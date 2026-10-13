@@ -284,7 +284,7 @@ fi
   CLANG_COVERAGE_MAPPING=NO \
   GCC_INSTRUMENT_PROGRAM_FLOW_ARCS=NO \
   GCC_GENERATE_TEST_COVERAGE_FILES=NO \
-  "${extra_build_settings[@]}" \
+  ${extra_build_settings[@]+"${extra_build_settings[@]}"} \
   build
 
 /bin/mkdir -p "$DIST_DIR"
