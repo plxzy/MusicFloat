@@ -13,3 +13,7 @@ dist/
 
 # Stray conversation exports from unrelated tooling
 hermes_conversation_*.json
+
+# Local assistant configuration
+/.claude/
+/.mcp.json
