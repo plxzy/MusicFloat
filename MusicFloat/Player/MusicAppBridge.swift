@@ -492,14 +492,6 @@ struct PublicAppleMusicAppBridge: MusicAppBridge {
     }
 }
 
-struct ExperimentalMusicAppBridge: MusicAppBridge {
-    let displayName = "Experimental Music.app bridge"
-
-    func currentState() async -> PlayerState {
-        .disconnected
-    }
-}
-
 struct DisabledMusicAppBridge: MusicAppBridge {
     let displayName = "Disabled music bridge"
 

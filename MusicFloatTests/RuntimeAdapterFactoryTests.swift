@@ -29,10 +29,10 @@ final class RuntimeAdapterFactoryTests: XCTestCase {
     }
 
     @MainActor
-    func testLiveAppleMusicFactoryUsesPublicAdapters() {
+    func testLiveAppleMusicFactoryPrefersExperimentalPlayerAndPublicProviders() {
         let adapters = RuntimeAdapterFactory.makeAdapters(for: .liveAppleMusic)
 
-        XCTAssertEqual(adapters.musicBridge.displayName, "Public Apple API bridge")
+        XCTAssertEqual(adapters.musicBridge.displayName, "Experimental MediaRemote bridge")
         XCTAssertEqual(adapters.lyricsProvider.displayName, "Public lyrics provider")
         XCTAssertEqual(adapters.translationProvider.displayName, "Apple on-device translation")
     }

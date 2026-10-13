@@ -148,7 +148,6 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             panel.level = .floating
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
             panel.delegate = self
-            panel.isMovableByWindowBackground = !appState.isOverlayLocked
             panel.isMovable = !appState.isOverlayLocked
             panel.hidesOnDeactivate = false
             panel.isReleasedWhenClosed = false
@@ -257,7 +256,6 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     func updateInteraction(appState: AppState) {
         panel?.isMovable = !appState.isOverlayLocked
-        panel?.isMovableByWindowBackground = !appState.isOverlayLocked
         if appState.isOverlayLocked {
             if pendingMove != nil, let panel { persistPlacement(panel.frame, userInitiated: true) }
             pendingMove?.cancel()
@@ -296,6 +294,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         defer { isAdjustingFrame = false }
         panel.setFrame(frame, display: true)
         panel.contentView?.frame = NSRect(origin: .zero, size: frame.size)
+        // Clear, rounded borderless window: the shadow is derived from the
+        // content alpha, so recompute it whenever the height changes.
+        panel.invalidateShadow()
     }
 
     private func installScreenChangeObserverIfNeeded() {

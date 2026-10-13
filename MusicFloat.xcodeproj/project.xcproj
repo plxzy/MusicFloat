@@ -12,12 +12,22 @@
   },
   "files": [
     { "kind": "folder", "path": "MusicFloat", "target-membership": [ "MusicFloat" ] },
+    { "kind": "folder", "path": "MediaRemoteHelper", "target-membership": [ "MediaRemoteHelper" ] },
     { "kind": "folder", "path": "MusicFloatTests", "target-membership": [ "MusicFloatTests" ] },
     {
       "kind": "group",
       "name": "Products",
       "children": [
         { "path": "<PRODUCTS>/MusicFloat.app", "id": "71DE0D9F2FC2420100EB347F", "type": "wrapper.application", "index": false },
+        {
+          "path": "<PRODUCTS>/MediaRemoteHelper",
+          "id": "71DE0DA02FC2420100EB347F",
+          "type": "compiled.mach-o.executable",
+          "index": false,
+          "target-membership": [
+            { "build-phase": "MusicFloat/copy/Embed Helpers", "code-sign-on-copy": true },
+          ],
+        },
         { "path": "<PRODUCTS>/MusicFloatTests.xctest", "id": "8A0000012FC3600000EB347F", "type": "wrapper.cfbundle", "index": false },
       ],
     },
@@ -28,10 +38,12 @@
       "id": "71DE0D9E2FC2420100EB347F",
       "product": "Products/MusicFloat.app",
       "product-type": "application",
+      "dependencies": [ "MediaRemoteHelper" ],
       "build-phases": [
         "compile-sources",
         "frameworks",
         "resources",
+        { "kind": "copy", "name": "Embed Helpers", "bundle-base-path": "executables-directory" },
       ],
       "build-settings": {
         "ARCHS": "$(ARCHS_STANDARD)",
@@ -74,6 +86,31 @@
         "SWIFT_UPCOMING_FEATURE_INTERNAL_IMPORTS_BY_DEFAULT": "YES",
         "SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY": "YES",
         "SWIFT_VERSION": "6.0",
+      },
+    }, {
+      "name": "MediaRemoteHelper",
+      "id": "71DE0DA12FC2420100EB347F",
+      "product": "Products/MediaRemoteHelper",
+      "product-type": "tool",
+      "build-phases": [
+        "compile-sources",
+        "frameworks",
+      ],
+      "build-settings": {
+        "ARCHS": "$(ARCHS_STANDARD)",
+        "CODE_SIGN_IDENTITY": "-",
+        "CODE_SIGN_INJECT_BASE_ENTITLEMENTS": "NO",
+        "CODE_SIGN_STYLE": "Manual",
+        "CURRENT_PROJECT_VERSION": "6",
+        "DEAD_CODE_STRIPPING": "YES",
+        "ENABLE_HARDENED_RUNTIME": "YES",
+        "GENERATE_INFOPLIST_FILE": "NO",
+        "MACOSX_DEPLOYMENT_TARGET": "27.0",
+        "OTHER_CODE_SIGN_FLAGS": "--identifier com.apple.MusicFloatMediaRemoteHelper",
+        "PRODUCT_BUNDLE_IDENTIFIER": "com.apple.MusicFloatMediaRemoteHelper",
+        "PRODUCT_NAME": "MediaRemoteHelper",
+        "SDKROOT": "macosx",
+        "SUPPORTED_PLATFORMS": "macosx",
       },
     }, {
       "name": "MusicFloatTests",

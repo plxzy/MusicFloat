@@ -11,10 +11,10 @@ final class RuntimeFeatureFlagsTests: XCTestCase {
         XCTAssertFalse(flags.allowsHiddenProviderRefresh)
     }
 
-    func testLiveAppleMusicFlagsUsePublicProvidersWithoutHiddenRefresh() {
+    func testLiveAppleMusicFlagsUseExperimentalPlayerAndPublicProvidersWithoutHiddenRefresh() {
         let flags = RuntimeFeatureFlags.liveAppleMusic
 
-        XCTAssertEqual(flags.playerBridgeMode, .publicApple)
+        XCTAssertEqual(flags.playerBridgeMode, .experimental)
         XCTAssertEqual(flags.lyricsProviderMode, .publicApple)
         XCTAssertEqual(flags.translationProviderMode, .publicApple)
         XCTAssertFalse(flags.allowsHiddenProviderRefresh)

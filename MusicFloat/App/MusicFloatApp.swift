@@ -8,16 +8,10 @@ struct MusicFloatApp: App {
     private let appController = MusicFloatAppController()
 
     var body: some Scene {
+        // SettingsWindowController owns the real settings window. This scene
+        // only satisfies `App` and stays empty so ⌘, can't open a second copy.
         Settings {
-            SettingsView(
-                appState: appController.appState,
-                onTranslationPreferencesChanged: appController.translationPreferencesChanged,
-                onOverlayLayoutPreferencesChanged: appController.overlayLayoutPreferencesChanged,
-                onTranslationPreparationCompleted: appController.retryTranslationAfterPreparation,
-                onDiskMediaCachePreferenceChanged: appController.diskMediaCachePreferenceChanged,
-                mediaCacheUsageText: appController.mediaCacheUsageText,
-                clearMediaCache: appController.clearMediaCache
-            )
+            EmptyView()
         }
     }
 }
@@ -61,7 +55,14 @@ private final class MusicFloatAppController {
         panelController = FloatingPanelController()
 
         let mockAdapters = RuntimeAdapterFactory.makeAdapters(for: .architectureDefault)
-        playerController = PlayerController(bridge: mockAdapters.musicBridge)
+        playerController = PlayerController(
+            bridge: mockAdapters.musicBridge,
+            liveBridgeFactory: {
+                RuntimeAdapterFactory.makeMusicBridge(
+                    for: RuntimeFeatureFlags.liveAppleMusic.playerBridgeMode
+                )
+            }
+        )
         mockProviderPipelineController = ProviderPipelineController(
             lyricsProvider: mockAdapters.lyricsProvider,
             translationProvider: mockAdapters.translationProvider,

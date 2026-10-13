@@ -50,9 +50,11 @@ struct LyricsOverlayView: View {
     var onPresentationLayoutChanged: () -> Void = {}
     var playbackCommands: LyricsOverlayPlaybackCommands = .disabled
     @Environment(\.colorScheme) private var colorScheme
-    @State private var accessibilityDisplayOptions = OverlayAccessibilityDisplayOptions.current
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @State private var showsVolumeSlider = false
     @State private var draftVolume = 50.0
+    @State private var isScrubbingVolume = false
     @State private var isScrubbingPlayback = false
     @State private var draftPlaybackPosition = 0.0
     #if ENABLE_APPLE_TRANSLATION
@@ -93,7 +95,10 @@ struct LyricsOverlayView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background {
             LyricsOverlayBackgroundSurface(
-                displayOptions: accessibilityDisplayOptions,
+                displayOptions: OverlayAccessibilityDisplayOptions(
+                    reduceTransparency: reduceTransparency,
+                    increaseContrast: colorSchemeContrast == .increased
+                ),
                 colorScheme: colorScheme
             )
         }
@@ -120,9 +125,6 @@ struct LyricsOverlayView: View {
         }
         .onChange(of: panelHeight) {
             onPresentationLayoutChanged()
-        }
-        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)) { _ in
-            accessibilityDisplayOptions = .current
         }
     }
 
@@ -250,6 +252,7 @@ struct LyricsOverlayView: View {
                     value: $draftVolume,
                     in: 0...100,
                     onEditingChanged: { isEditing in
+                        isScrubbingVolume = isEditing
                         if !isEditing {
                             commitVolumeChange()
                         }
@@ -405,6 +408,7 @@ struct LyricsOverlayView: View {
     }
 
     private func syncDraftVolume() {
+        guard !isScrubbingVolume else { return }
         guard let volume = appState.musicVolume else { return }
         draftVolume = Double(MusicPlaybackCommand.clampedVolume(volume))
     }
@@ -501,13 +505,6 @@ struct LyricsOverlayView: View {
 private struct OverlayAccessibilityDisplayOptions: Equatable {
     let reduceTransparency: Bool
     let increaseContrast: Bool
-
-    static var current: OverlayAccessibilityDisplayOptions {
-        OverlayAccessibilityDisplayOptions(
-            reduceTransparency: NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,
-            increaseContrast: NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
-        )
-    }
 }
 
 private struct LyricsOverlayBackgroundSurface: View {

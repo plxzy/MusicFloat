@@ -48,7 +48,7 @@ final class SettingsWindowController {
 
     private func show(_ window: NSWindow) {
         AppTelemetry.settings.info("Open settings window requested")
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         window.makeKeyAndOrderFront(nil)
     }
 }

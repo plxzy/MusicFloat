@@ -17,7 +17,7 @@ enum RuntimeAdapterFactory {
         )
     }
 
-    private static func makeMusicBridge(for mode: RuntimeAdapterMode) -> any MusicAppBridge {
+    static func makeMusicBridge(for mode: RuntimeAdapterMode) -> any MusicAppBridge {
         switch mode {
         case .mock:
             MockMusicAppBridge()
