@@ -23,6 +23,13 @@ enum AppleScriptRunner {
         await AppleScriptExecutor.shared.runData(source)
     }
 
+    /// Runs `body` on the same long-lived scripting thread. ScriptingBridge
+    /// calls are synchronous Apple events and share OSAKit's thread affinity.
+    nonisolated static func performOffMain<Value: Sendable>(
+        _ body: @escaping @Sendable () -> Value
+    ) async -> Value {
+        await AppleScriptExecutor.shared.perform(body)
+    }
 }
 
 /// OSAKit is thread-affine and can throw Objective-C exceptions when its
@@ -60,6 +67,14 @@ nonisolated private final class AppleScriptExecutor: @unchecked Sendable {
         await withCheckedContinuation { continuation in
             enqueue { [self] in
                 continuation.resume(returning: runDescriptor(source)?.rawDescriptorData)
+            }
+        }
+    }
+
+    nonisolated func perform<Value: Sendable>(_ body: @escaping @Sendable () -> Value) async -> Value {
+        await withCheckedContinuation { continuation in
+            enqueue {
+                continuation.resume(returning: body())
             }
         }
     }

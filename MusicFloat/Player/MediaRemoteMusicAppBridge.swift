@@ -19,6 +19,7 @@ final class MediaRemoteHelperSession {
     private var outputPipe: Pipe?
     private var outputTask: Task<Void, Never>?
     private var currentStateValue = PlayerState.disconnected
+    private var currentPlaybackRate: TimeInterval = 0
     private var helperReady = false
     private var initialStateReceived = false
     private var stateContinuation: AsyncStream<PlayerState>.Continuation?
@@ -41,7 +42,24 @@ final class MediaRemoteHelperSession {
         if !initialStateReceived {
             try? await Task.sleep(nanoseconds: UInt64(Self.startupGrace * 1_000_000_000))
         }
-        return currentStateValue
+        return Self.extrapolated(currentStateValue, rate: currentPlaybackRate, now: Date())
+    }
+
+    /// MediaRemote only reports on state changes, so a cached playing state's
+    /// elapsed time goes stale. Advance it to `now` before handing it to
+    /// callers such as the live watchdog, which treat it as authoritative.
+    static func extrapolated(_ state: PlayerState, rate: TimeInterval, now: Date) -> PlayerState {
+        guard state.playbackStatus == .playing, rate > 0 else { return state }
+        var elapsed = state.elapsedTime + max(0, now.timeIntervalSince(state.updatedAt)) * rate
+        if let duration = state.track?.duration, duration.isFinite, duration > 0 {
+            elapsed = min(duration, elapsed)
+        }
+        return PlayerState(
+            playbackStatus: state.playbackStatus,
+            track: state.track,
+            elapsedTime: elapsed,
+            updatedAt: now
+        )
     }
 
     func events() -> AsyncStream<PlayerState> {
@@ -142,22 +160,24 @@ final class MediaRemoteHelperSession {
             helperReady = true
             initialStateReceived = true
             currentStateValue = .disconnected
+            currentPlaybackRate = 0
             stateContinuation?.yield(currentStateValue)
         case "playing", "paused":
-            guard let state = parseState(payload, status: status) else {
+            guard let (state, rate) = parseState(payload, status: status) else {
                 AppTelemetry.lifecycle.info("MediaRemote helper message rejected reason=invalid-state")
                 return
             }
             helperReady = true
             initialStateReceived = true
             currentStateValue = state
+            currentPlaybackRate = rate
             stateContinuation?.yield(state)
         default:
             AppTelemetry.lifecycle.info("MediaRemote helper message rejected reason=unknown-status")
         }
     }
 
-    private func parseState(_ payload: [String: Any], status: String) -> PlayerState? {
+    private func parseState(_ payload: [String: Any], status: String) -> (PlayerState, TimeInterval)? {
         guard let title = payload["title"] as? String,
               let artist = payload["artist"] as? String,
               let album = payload["album"] as? String,
@@ -184,7 +204,7 @@ final class MediaRemoteHelperSession {
                 ? contentIdentifier!
                 : [bundleIdentifier, artist, album, title].joined(separator: "|"))
 
-        return PlayerState(
+        let state = PlayerState(
             playbackStatus: status == "playing" ? .playing : .paused,
             track: NowPlayingTrack(
                 id: id,
@@ -197,6 +217,7 @@ final class MediaRemoteHelperSession {
             elapsedTime: elapsed,
             updatedAt: Date()
         )
+        return (state, rate)
     }
 
     private func adjustedElapsed(

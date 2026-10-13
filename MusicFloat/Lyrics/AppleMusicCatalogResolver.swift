@@ -69,7 +69,9 @@ enum AppleMusicCatalogResolver {
     // MARK: - AppleScript URL parsing
 
     private static func resolveFromAppleScript(lookupID: String) async -> Identity? {
-        guard let raw = await AppleScriptRunner.runStringOffMain(urlScript)?
+        guard let raw = await (MusicScriptingBridge.isEnabled
+                ? MusicScriptingBridge.currentTrackURLString()
+                : AppleScriptRunner.runStringOffMain(urlScript))?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty,
               let url = URL(string: raw),

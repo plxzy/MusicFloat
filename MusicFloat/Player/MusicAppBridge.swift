@@ -154,7 +154,9 @@ struct PublicAppleMusicAppBridge: MusicAppBridge {
         }
 
         let normalizedCommand = command.clamped
-        guard let raw = await AppleScriptRunner.runStringOffMain(Self.commandScript(for: normalizedCommand)),
+        guard let raw = await (MusicScriptingBridge.isEnabled
+                ? MusicScriptingBridge.commandString(for: normalizedCommand)
+                : AppleScriptRunner.runStringOffMain(Self.commandScript(for: normalizedCommand))),
               !raw.isEmpty else {
             return .failed("Music.app command returned no result")
         }
@@ -174,7 +176,9 @@ struct PublicAppleMusicAppBridge: MusicAppBridge {
         guard AppleMusicEventListener.isMusicAppRunning else {
             return nil
         }
-        guard let raw = await AppleScriptRunner.runStringOffMain(Self.volumeScript),
+        guard let raw = await (MusicScriptingBridge.isEnabled
+                ? MusicScriptingBridge.volumeString()
+                : AppleScriptRunner.runStringOffMain(Self.volumeScript)),
               !raw.isEmpty,
               !raw.hasPrefix("__ERR__||") else {
             return nil
@@ -437,7 +441,9 @@ struct PublicAppleMusicAppBridge: MusicAppBridge {
 
     private static func pullSnapshot() async -> PlayerState? {
         guard AppleMusicEventListener.isMusicAppRunning else { return nil }
-        guard let raw = await AppleScriptRunner.runStringOffMain(snapshotScript), !raw.isEmpty else {
+        guard let raw = await (MusicScriptingBridge.isEnabled
+            ? MusicScriptingBridge.snapshotString()
+            : AppleScriptRunner.runStringOffMain(snapshotScript)), !raw.isEmpty else {
             return nil
         }
         let parts = raw.components(separatedBy: "||")

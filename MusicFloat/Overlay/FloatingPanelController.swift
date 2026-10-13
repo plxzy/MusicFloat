@@ -68,7 +68,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             panel?.orderOut(nil)
 
             if releaseResources {
+                // orderOut alone leaves the window registered with AppKit, which
+                // keeps the NSPanel and its window backing store alive.
                 panel?.contentView = nil
+                panel?.close()
                 panel = nil
             }
         }

@@ -100,7 +100,9 @@ enum PublicAppleMusicArtworkProvider {
         guard await MainActor.run(body: { AppleMusicEventListener.isMusicAppRunning }) else {
             return nil
         }
-        guard let data = await AppleScriptRunner.runDataOffMain(artworkScript),
+        guard let data = await (MusicScriptingBridge.isEnabled
+            ? MusicScriptingBridge.artworkData()
+            : AppleScriptRunner.runDataOffMain(artworkScript)),
               !data.isEmpty else {
             await MainActor.run {
                 AppTelemetry.performance.info("Music artwork unavailable from AppleScript")

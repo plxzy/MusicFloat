@@ -4,9 +4,9 @@
 // the app target so a framework ABI change or an invalid signing identity can
 // be contained by terminating the helper and falling back to AppleScript.
 
-#import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
+#import <libproc.h>
 #import <signal.h>
 #import <unistd.h>
 
@@ -50,6 +50,22 @@ static void writeJSON(NSDictionary *payload) {
     fflush(stdout);
 }
 
+// Resolves the bundle identifier from the process's executable path. Avoids
+// NSRunningApplication so this helper does not load AppKit (~0.7 MB footprint).
+static NSString *bundleIdentifierForPID(int pid) {
+    char path[PROC_PIDPATHINFO_MAXSIZE];
+    if (proc_pidpath(pid, path, sizeof(path)) <= 0) {
+        return nil;
+    }
+    NSString *executable = [NSString stringWithUTF8String:path];
+    NSRange contents = [executable rangeOfString:@".app/Contents/MacOS/" options:NSBackwardsSearch];
+    if (contents.location == NSNotFound) {
+        return nil;
+    }
+    NSString *bundlePath = [executable substringToIndex:contents.location + 4];
+    return [NSBundle bundleWithPath:bundlePath].bundleIdentifier;
+}
+
 static NSNumber *numberValue(id value) {
     return [value isKindOfClass:[NSNumber class]] ? value : nil;
 }
@@ -61,8 +77,7 @@ static NSString *stringValue(id value) {
 static void emitState(NSDictionary *info, int pid, BOOL isPlaying) {
     NSString *bundleIdentifier = nil;
     if (pid > 0) {
-        NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
-        bundleIdentifier = application.bundleIdentifier;
+        bundleIdentifier = bundleIdentifierForPID(pid);
     }
 
     // MusicFloat is an Apple Music bridge. Do not silently turn another media
@@ -178,19 +193,15 @@ int main(void) {
     @autoreleasepool {
         g_stateQueue = dispatch_queue_create("cv.musicfloat.mediaremote-helper", DISPATCH_QUEUE_SERIAL);
         g_parentPID = getppid();
-        g_parentMonitor = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, g_stateQueue);
-        dispatch_source_set_timer(
-            g_parentMonitor,
-            dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
-            NSEC_PER_SEC,
-            NSEC_PER_MSEC * 100
-        );
+        // Exit with the parent without a periodic wakeup.
+        g_parentMonitor = dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, (uintptr_t)g_parentPID, DISPATCH_PROC_EXIT, g_stateQueue);
         dispatch_source_set_event_handler(g_parentMonitor, ^{
-            if (getppid() != g_parentPID) {
-                _exit(0);
-            }
+            _exit(0);
         });
         dispatch_resume(g_parentMonitor);
+        if (getppid() != g_parentPID) {
+            _exit(0);
+        }
         signal(SIGTERM, handleSignal);
         signal(SIGINT, handleSignal);
 

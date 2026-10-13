@@ -99,6 +99,48 @@ Keep raw traces out of git; cite run IDs from `reports/performance-runs.jsonl`.
 
 ## Resolved
 
+### PERF-008: In-process AppleScript pins ~13 MB of XProtect rules
+
+- Status: fixed in working tree (uncommitted), 2026-10-13
+- Signal: live mode physical footprint was ~45 MB vs ~16 MB idle menu bar and
+  ~23 MB demo overlay.
+- Evidence (local-only, scratch Release build with get-task-allow): malloc stack
+  logging attributed 13.85 MB of live allocations to `XPBuildYARARules` under
+  `OSACompile` -> `InterpreterSecurity_ScanBuffer`. Standalone probes showed any
+  in-process OSA execution costs +12-14 MB once for the process lifetime: source
+  compile, `NSAppleScript`, precompiled `.scpt`, and `return 1 + 1`. ScriptingBridge
+  reads of the same properties cost about +2 MB.
+- Fix: `Player/MusicScriptingBridge.swift` serves snapshot, volume, playback
+  commands, lyrics, catalog URL, and artwork through ScriptingBridge on the
+  existing scripting thread. It returns the same raw strings, so callers keep
+  one parser. Launch with `--osakit-music-scripting` to use the old OSA path.
+- Validation: a live MSL run showed 0 bytes under XprotectFramework. Local live
+  footprint at ~30s fell from 45 MB to 29 MB. Clean same-mode 40s live pair
+  `20261013-151043Z-live-Direct-Sample-b5ca154` (baseline HEAD) vs
+  `20261013-151147Z-live-Direct-Sample-4caca79` (candidate snapshot) both passed
+  live verification: avg RSS 107.3 -> 96.0 MB, avg CPU 4.43 -> 2.37 percent,
+  max CPU 28.1 -> 25.4 percent. This is a single pair. Part of the CPU drop is
+  likely the MediaRemote watchdog fix recorded in `bugs-and-issues.md`.
+- Not yet exercised live: the ScriptingBridge playback command path
+  (play/pause, skip, seek, volume set). Commands were not sent to avoid changing
+  the user's playback.
+
+### PERF-009: Hidden overlay kept its NSPanel and window backing store
+
+- Status: fixed in working tree (uncommitted), 2026-10-13
+- Signal: with "Reduce hidden memory use" on (the default), hiding the overlay
+  cleared `contentView` but never closed the panel. The heap kept one
+  `NSKVONotifying_NSPanel`, and footprint kept ~2.8 MB of
+  "Owned physical footprint (unmapped)" window surfaces.
+- Fix: `FloatingPanelController.hide(releaseResources: true)` now calls
+  `close()` before dropping the panel.
+- Validation (local-only): `--demo --hide-after=12` showed 0 NSPanel instances
+  after hide, no owned-unmapped row, and footprint 24 -> 20 MB (previously 22 MB).
+- Related helper change: `MediaRemoteHelper` no longer links AppKit (libproc path
+  -> bundle ID instead of `NSRunningApplication`), lowering helper footprint
+  from 4.2 to 3.4 MB. A `DISPATCH_PROC_EXIT` source replaces the 1 Hz
+  parent-poll timer.
+
 ### PERF-006: Live AppleScript polling repeatedly recompiles scripts
 
 - Status: resolved in PR #17

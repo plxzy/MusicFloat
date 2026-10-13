@@ -43,6 +43,20 @@ the status as fixes land or evidence changes.
 
 ## Resolved
 
+### 2026-10-13 MediaRemote bridge froze the live watchdog position
+
+- `MediaRemoteHelperSession.currentState()` returned the cached state from the
+  last MediaRemote notification. MediaRemote only posts on changes, so while a
+  track played, `elapsedTime` stayed fixed. The live watchdog treats that
+  snapshot as authoritative, so it snapped local playback back roughly every
+  tick. Live logs showed 25 corrections in 30s pinned to one
+  `snapshotElapsed`. The OSA fallback path also reproduced it, because the
+  watchdog reads the bridge, not AppleScript.
+- Fix: cached playing states are extrapolated by wall time and playback rate,
+  clamped to track duration (`MediaRemoteHelperSession.extrapolated`, covered by
+  `MediaRemoteHelperSessionTests`). Post-fix live run: one watchdog correction
+  in 35s.
+
 ### 2026-10-13 follow-up correctness, overlay placement, and playback recovery
 
 - Shared public lyrics lookups now track subscribers: cancellation resumes the
