@@ -695,8 +695,15 @@ start_usage_capture() {
   (
     set +e
     while true; do
+      # Only sample the process launched from the profiled bundle; another
+      # MusicFloat (installed or Xcode build) may already be running.
       pid=""
-      pid="$(/usr/bin/pgrep -x "$APP_NAME" | /usr/bin/head -n 1 || true)"
+      for candidate in $(/usr/bin/pgrep -x "$APP_NAME" || true); do
+        if [[ "$(/bin/ps -o command= -p "$candidate" 2>/dev/null)" == "$APP_EXEC"* ]]; then
+          pid="$candidate"
+          break
+        fi
+      done
       if [[ -n "$pid" ]]; then
         /bin/ps -o pid=,rss=,%cpu= -p "$pid" | /usr/bin/awk -v ts="$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" '
           NF >= 3 { printf "%s,%s,%s,%s\n", ts, $1, $2, $3 }

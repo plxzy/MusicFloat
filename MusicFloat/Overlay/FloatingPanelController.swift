@@ -73,8 +73,27 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
                 panel?.contentView = nil
                 panel?.close()
                 panel = nil
+                releaseCurrentEventWindow()
             }
         }
+    }
+
+    /// `NSApp.currentEvent` keeps the last event's window alive until another
+    /// event arrives, which can take a long time for a menu bar app. Post a
+    /// no-op event so a closed panel and its backing surfaces can be freed.
+    private func releaseCurrentEventWindow() {
+        guard let event = NSEvent.otherEvent(
+            with: .applicationDefined,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: 0,
+            context: nil,
+            subtype: 0,
+            data1: 0,
+            data2: 0
+        ) else { return }
+        NSApp.postEvent(event, atStart: false)
     }
 
     func updateLayout(appState: AppState) {

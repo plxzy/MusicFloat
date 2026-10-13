@@ -121,9 +121,20 @@ Keep raw traces out of git; cite run IDs from `reports/performance-runs.jsonl`.
   live verification: avg RSS 107.3 -> 96.0 MB, avg CPU 4.43 -> 2.37 percent,
   max CPU 28.1 -> 25.4 percent. This is a single pair. Part of the CPU drop is
   likely the MediaRemote watchdog fix recorded in `bugs-and-issues.md`.
-- Not yet exercised live: the ScriptingBridge playback command path
-  (play/pause, skip, seek, volume set). Commands were not sent to avoid changing
-  the user's playback.
+- Command path: a probe using the same ScriptingBridge calls toggled play/pause,
+  seeked, skipped next/previous, and set volume against live Music.app. The very
+  first play/pause in one probe run did not toggle; 7 follow-up toggles in fresh
+  processes all did, and that miss has not reproduced. A forced read-only `setTo`
+  fired the error delegate (-1731), which the session reports as `__ERR__||`.
+- Driven live pair (`--live --drive-music`, 40s): baseline
+  `20261013-153129Z-live-Direct-Sample-b5ca154` vs candidate
+  `20261013-152935Z-live-Direct-Sample-debcdbf`. Both passed live verification
+  with driven seeks and a track change. Watchdog resyncs dropped from 33 to 1,
+  and avg RSS from 109.9 to 93.2 MB. Avg CPU 1.77 -> 2.47 percent and max CPU
+  24.8 -> 21.1 percent: inconclusive on CPU from one pair. An earlier baseline
+  attempt sampled a different, already-running MusicFloat PID and was discarded.
+  `start_usage_capture` now samples only the process launched from the profiled
+  bundle.
 
 ### PERF-009: Hidden overlay kept its NSPanel and window backing store
 
@@ -133,7 +144,15 @@ Keep raw traces out of git; cite run IDs from `reports/performance-runs.jsonl`.
   `NSKVONotifying_NSPanel`, and footprint kept ~2.8 MB of
   "Owned physical footprint (unmapped)" window surfaces.
 - Fix: `FloatingPanelController.hide(releaseResources: true)` now calls
-  `close()` before dropping the panel.
+  `close()` before dropping the panel. Even closed, the panel survived when it
+  had received the last event. `leaks --traceTree` showed
+  `NSApplication._currentEvent -> NSEvent._window -> panel`, and a menu bar app
+  can go a long time without another event. Hide now posts a no-op
+  application-defined event so the panel and its surfaces are freed.
+  Validation: 3/3 runs with 0 panels and 20 MB after hide (24 MB when the
+  panel lingered).
+- Checked and rejected: `malloc_zone_pressure_relief` after hide returned 0
+  bytes in demo and live mode.
 - Validation (local-only): `--demo --hide-after=12` showed 0 NSPanel instances
   after hide, no owned-unmapped row, and footprint 24 -> 20 MB (previously 22 MB).
 - Related helper change: `MediaRemoteHelper` no longer links AppKit (libproc path
