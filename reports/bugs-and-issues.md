@@ -60,12 +60,33 @@ the status as fixes land or evidence changes.
   All 160 tests passed with a temporary xcconfig aligning the test signing team
   and deployment target to the app. Result:
   `.codex/DerivedData/Logs/Test/Test-MusicFloat-2026.10.13_13-20-14-+0200.xcresult`.
-- Gate limitations: the unchanged test target references a team with no local
-  signing certificate and targets macOS 26.5 while the app targets 27.0.
-  After temporary overrides, `agent_verify.sh` stopped at its warning gate on
-  `SystemLifecycleObserverTests.swift:48` (`isStopped` mutated after capture by
-  a sendable closure). Signing/deployment settings and test source were preserved;
-  the full strict gate is not a pass.
+- Resolution of gate limitations: aligned test deployment target to 27.0 and
+  team to ZVUZ78V2UF in `project.xcproj`, and wrapped `isStopped` in a
+  `@MainActor` class in `SystemLifecycleObserverTests.swift` to eliminate the
+  Swift 6 strict concurrency compiler warning. `agent_verify.sh` now completes
+  with zero warnings and full test pass.
+
+### 2026-10-13 Floating overlay panel dragging and sizing fix
+
+- Status: resolved
+- Area: overlay panel interaction, window server dragging, and NSHostingView sizing.
+- Symptom: dragging the overlay background did not move the window, and panel
+  height was forced to 164 pt instead of the expected 148 pt collapsed / 248 pt expanded.
+- Root causes:
+  1. `NSHostingView` consumed mouse-down events, preventing `NSPanel`'s
+     `isMovableByWindowBackground = true` from receiving events.
+  2. `NSHostingView.sizingOptions` defaults allowed SwiftUI ideal sizes to push
+     constraints back to the window, overriding the controller's layout heights.
+- Fix:
+  1. Added `.gesture(WindowDragGesture())` to `LyricsOverlayView`, allowing macOS
+     window drag while preserving child interactive controls (buttons, scrub slider).
+  2. Set `hostingView.sizingOptions = []` in `FloatingPanelController.makePanel`
+     so the panel controller exclusively controls frame dimensions.
+- Verification:
+  - Synthetic mouse drag test verified panel moves by (+114, +57) on background.
+  - Scrub slider priority test verified scrubbing does not drag window.
+  - Panel bounds sampling verified exact heights (248 pt expanded / 148 pt collapsed).
+  - All 160 tests passed with zero warnings via `./script/agent_verify.sh`.
 
 ### 2026-05-25 stale lyrics shown after no-lyrics track change
 
