@@ -155,6 +155,10 @@ final class FloatingPanelController: NSObject {
                 },
                 playbackCommands: playbackCommands
             ))
+            // The controller owns the panel frame (see applySize). Without this,
+            // NSHostingView pushes SwiftUI's ideal size into window constraints
+            // and silently overrides the expanded/collapsed heights.
+            hostingView.sizingOptions = []
             hostingView.frame = NSRect(origin: .zero, size: panelSize)
             hostingView.autoresizingMask = [.width, .height]
             panel.contentView = hostingView

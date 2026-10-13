@@ -4,11 +4,16 @@ import XCTest
 
 final class SystemLifecycleObserverTests: XCTestCase {
     @MainActor
+    private final class CallbackState {
+        var isStopped = false
+    }
+
+    @MainActor
     func testObserverRoutesWorkspaceSuspendAndResumeEvents() async {
         let center = NotificationCenter()
         var suspended: [SystemLifecycleObserver.Event] = []
         var resumed: [SystemLifecycleObserver.Event] = []
-        var isStopped = false
+        let state = CallbackState()
         let suspendExpectation = expectation(description: "suspend callbacks delivered")
         suspendExpectation.expectedFulfillmentCount = 2
         let resumeExpectation = expectation(description: "resume callbacks delivered")
@@ -19,7 +24,7 @@ final class SystemLifecycleObserverTests: XCTestCase {
         let observer = SystemLifecycleObserver(
             notificationCenter: center,
             onSuspend: { event in
-                if isStopped {
+                if state.isStopped {
                     stoppedExpectation.fulfill()
                     return
                 }
@@ -27,7 +32,7 @@ final class SystemLifecycleObserverTests: XCTestCase {
                 suspendExpectation.fulfill()
             },
             onResume: { event in
-                if isStopped {
+                if state.isStopped {
                     stoppedExpectation.fulfill()
                     return
                 }
@@ -45,7 +50,7 @@ final class SystemLifecycleObserverTests: XCTestCase {
         XCTAssertEqual(suspended, [.willSleep, .sessionDidResignActive])
         XCTAssertEqual(resumed, [.didWake, .sessionDidBecomeActive])
 
-        isStopped = true
+        state.isStopped = true
         observer.stop()
         center.post(name: NSWorkspace.willSleepNotification, object: nil)
         await fulfillment(of: [stoppedExpectation], timeout: 0.1)

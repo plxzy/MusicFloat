@@ -96,6 +96,10 @@ struct LyricsOverlayView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
+        // NSHostingView consumes mouse-down events, so the panel's
+        // isMovableByWindowBackground never triggers. Child controls (buttons,
+        // the scrub DragGesture) still win over this parent gesture.
+        .gesture(WindowDragGesture())
         .onAppear {
             AppTelemetry.windowing.info("Lyrics overlay view appeared")
             syncDraftVolume()
