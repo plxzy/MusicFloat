@@ -131,7 +131,8 @@ P0 - Tighten privacy-safe telemetry.
 - Replace with source, stage, counts, coarse duration, and a local hashed track key.
 - Keep raw values behind an explicit debug flag and document that flag as local-only.
 
-P0 - Reconcile sandbox and entitlement baseline.
+P0 - Reconcile sandbox and entitlement baseline. (Resolved 2026-10-13: sandbox
+off is intentional and documented in `AGENTS.md`.)
 
 - `AGENTS.md` says keep sandbox and hardened runtime on until a specific integration proves it needs narrow entitlement changes.
 - The project currently has `ENABLE_APP_SANDBOX = NO` for Debug and Release, while hardened runtime remains enabled and entitlements are empty.

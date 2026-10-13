@@ -106,6 +106,11 @@ Keep raw strings only when:
 
 ### BUG-R2: Sandbox mismatch
 
+Resolved 2026-10-13: sandbox off is intentional. Live mode needs Accessibility
+access to Music.app, Apple Events to Music.app, and the bundled
+`MediaRemoteHelper` process, none of which fit the App Sandbox. `AGENTS.md` now
+documents this; hardened runtime stays on with empty entitlements.
+
 This is either a real configuration bug or an intentional live-integration tradeoff that needs to be documented. The current state is ambiguous:
 
 - Hardened runtime is on.

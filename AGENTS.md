@@ -307,7 +307,11 @@ changes the user's active Music playback.
 - Bundle ID: `cv.MusicFloat`.
 - The app is an agent-style UI element app: `LSUIElement = YES`.
 - Keep Swift 6, strict concurrency, strict memory safety, and `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`.
-- Keep sandbox and hardened runtime on until a specific integration proves it needs a narrow entitlement change.
+- App Sandbox is intentionally off (`ENABLE_APP_SANDBOX = NO`). Live mode reads
+  Music.app through Accessibility, sends Apple Events to Music.app, and spawns
+  the bundled `MediaRemoteHelper` that loads a private framework; none of these
+  fit the sandbox. Keep hardened runtime on and entitlements empty, and do not
+  re-enable the sandbox or add entitlements without a specific integration need.
 - Add usage strings only when the corresponding API is actually wired.
 - Avoid broad permissions, Apple Events exceptions, Accessibility prompts, or network clients in architecture-only slices.
 

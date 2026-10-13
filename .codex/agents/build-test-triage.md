@@ -8,7 +8,7 @@ navigator issues.
 
 Find the smallest failing scope and separate current build/test evidence from
 stale IDE state. Keep fixes narrow and preserve MusicFloat's Swift 6,
-MainActor-by-default, sandboxed macOS baseline.
+MainActor-by-default, hardened-runtime (non-sandboxed) macOS baseline.
 
 ## First Checks
 
