@@ -307,7 +307,9 @@ struct PublicAppleMusicAppBridge: MusicAppBridge {
 
         switch event.playbackStatus {
         case .playing:
-            let extrapolated = lastEmittedState.elapsedTime + now.timeIntervalSince(lastEmittedAt)
+            let playingDelta = lastEmittedState.playbackStatus == .playing
+                ? max(0, now.timeIntervalSince(lastEmittedAt)) : 0
+            let extrapolated = lastEmittedState.elapsedTime + playingDelta
             return RefinedPlayerInfoEvent(
                 state: PlayerState(
                     playbackStatus: .playing,

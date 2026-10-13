@@ -82,19 +82,16 @@ struct LyricsOverlayView: View {
             isLyricsExpanded: appState.isLyricsOverlayExpanded
         )
 
-        return ZStack {
-            overlayContent(for: snapshot)
-            .padding(.horizontal, 24)
-            .padding(.vertical, 18)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .background {
-                LyricsOverlayBackgroundSurface(
-                    displayOptions: accessibilityDisplayOptions,
-                    colorScheme: colorScheme
-                )
-            }
+        return overlayContent(for: snapshot)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .background {
+            LyricsOverlayBackgroundSurface(
+                displayOptions: accessibilityDisplayOptions,
+                colorScheme: colorScheme
+            )
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         // NSHostingView consumes mouse-down events, so the panel's
         // isMovableByWindowBackground never triggers. Child controls (buttons,
@@ -395,7 +392,6 @@ struct LyricsOverlayView: View {
 
     private func toggleLyricsExpansion() {
         appState.setLyricsOverlayExpanded(!appState.isLyricsOverlayExpanded)
-        onPresentationLayoutChanged()
     }
 
     private func toggleVolumeSlider() {
@@ -710,7 +706,6 @@ private struct LyricsLineStackView: View {
                         lyricClockReferenceDate: snapshot.lyricClockReferenceDate,
                         isLyricClockRunning: snapshot.isLyricClockRunning
                     )
-                        .id(row.id)
                         .transition(.opacity)
                 }
             }

@@ -405,6 +405,166 @@ final class ProviderPipelineControllerTests: XCTestCase {
         XCTAssertFalse(secondKey.rawValue.contains("Different private lyric text"))
     }
 
+    func testCancelledLyricsLoadCannotClearReplacementTask() async throws {
+        let appState = appStateWithLyrics()
+        let started = expectation(description: "Both lyrics requests started")
+        started.expectedFulfillmentCount = 2
+        let lyricsProvider = ControllableLyricsProvider(document: appState.lyricsDocument, started: started)
+        let controller = ProviderPipelineController(
+            lyricsProvider: lyricsProvider,
+            translationProvider: RecordingTranslationProvider()
+        )
+
+        controller.prepareOverlayContent(appState: appState)
+        try await waitUntil { lyricsProvider.requestedTrackIDs.count == 1 }
+        appState.updatePlayerState(playerState(trackID: "track:replacement"))
+        controller.refreshOverlayContent(appState: appState)
+        await fulfillment(of: [started], timeout: 1)
+
+        lyricsProvider.complete()
+        try await waitUntil { lyricsProvider.completedRequestCount == 1 }
+        await drainPipelineTasks()
+        controller.prepareOverlayContent(appState: appState)
+        await drainPipelineTasks()
+
+        XCTAssertEqual(lyricsProvider.requestedTrackIDs, ["track:pipeline", "track:replacement"])
+        controller.stopHiddenWork(appState: appState)
+        lyricsProvider.complete(index: 1)
+        try await waitUntil { lyricsProvider.completedRequestCount == 2 }
+        await drainPipelineTasks()
+        XCTAssertEqual(appState.providerRuntimeState, .idle)
+    }
+
+    func testLiveResumeRestartsCancelledTranslationAndRetainsReplacementOwnership() async throws {
+        let appState = appStateWithLyrics()
+        let lyricsProvider = RecordingLyricsProvider()
+        let started = expectation(description: "Original and resumed translations started")
+        started.expectedFulfillmentCount = 2
+        let translationProvider = ControllableTranslationProvider(started: started)
+        let controller = ProviderPipelineController(
+            lyricsProvider: lyricsProvider,
+            translationProvider: translationProvider
+        )
+
+        controller.refreshTranslation(appState: appState)
+        try await waitUntil { translationProvider.requestCount == 1 }
+        appState.isOverlayVisible = false
+        controller.stopHiddenWork(appState: appState)
+        appState.isOverlayVisible = true
+        controller.resumeVisibleLiveOverlayContent(appState: appState)
+        await fulfillment(of: [started], timeout: 1)
+        XCTAssertEqual(lyricsProvider.requestedTrackIDs, [])
+
+        translationProvider.complete(with: .status(.unavailable(reason: "Old request")))
+        try await waitUntil { translationProvider.completedRequestCount == 1 }
+        await drainPipelineTasks()
+        appState.isOverlayVisible = false
+        controller.stopHiddenWork(appState: appState)
+        translationProvider.complete(with: .available(MockTranslationProvider.previewTranslation(
+            targetLanguageIdentifier: appState.preferredTranslationLanguageIdentifier
+        )), index: 1)
+        try await waitUntil { translationProvider.completedRequestCount == 2 }
+        await drainPipelineTasks()
+
+        XCTAssertEqual(appState.translation.lines, [])
+        XCTAssertEqual(appState.translationRuntimeState, .unavailable(reason: "Translation cancelled"))
+    }
+
+    func testCancelledCacheMissDoesNotStartTranslationProvider() async throws {
+        let appState = appStateWithLyrics()
+        let cache = SuspendingMediaCache(suspendsRead: true)
+        let provider = CountingTranslationProvider()
+        let controller = ProviderPipelineController(
+            lyricsProvider: RecordingLyricsProvider(), translationProvider: provider, mediaCache: cache
+        )
+
+        controller.refreshTranslation(appState: appState)
+        try await waitUntil { cache.isWaiting }
+        controller.stopHiddenWork(appState: appState)
+        cache.resume()
+        try await waitUntil { cache.didResume }
+        await drainPipelineTasks()
+
+        XCTAssertEqual(provider.requestCount, 0)
+        XCTAssertEqual(appState.translationRuntimeState, .unavailable(reason: "Translation cancelled"))
+    }
+
+    func testTrackChangeDuringCacheStoreCannotApplyStaleTranslation() async throws {
+        let appState = appStateWithLyrics()
+        let cache = SuspendingMediaCache(suspendsRead: false)
+        let controller = ProviderPipelineController(
+            lyricsProvider: RecordingLyricsProvider(),
+            translationProvider: CountingTranslationProvider(),
+            mediaCache: cache
+        )
+
+        controller.refreshTranslation(appState: appState)
+        try await waitUntil { cache.isWaiting }
+        appState.updatePlayerState(playerState(trackID: "track:new"))
+        cache.resume()
+        try await waitUntil { cache.didResume }
+        await drainPipelineTasks()
+
+        XCTAssertEqual(appState.translation.lines, [])
+        XCTAssertNotEqual(appState.translationRuntimeState, .ready)
+    }
+
+    private func appStateWithLyrics() -> AppState {
+        let defaults = UserDefaults(suiteName: "MusicFloatTests.pipeline.\(UUID().uuidString)")!
+        let appState = AppState(userDefaults: defaults)
+        appState.runtimeFeatureFlags = .liveAppleMusic
+        appState.isOverlayVisible = true
+        appState.showsTranslation = true
+        appState.setLiveModeRunning(true)
+        appState.updatePlayerState(playerState(trackID: "track:pipeline"))
+        appState.applyLyricsDocument(LyricsDocument(
+            source: .appleMusicWeb,
+            lines: [LyricLine(id: 0, text: "Translate current lyrics", startTime: 0)],
+            isTimed: true,
+            sourceLanguageIdentifier: "en"
+        ))
+        appState.applyProviderReady()
+        appState.clearTranslation()
+        return appState
+    }
+
+    private func drainPipelineTasks() async {
+        for _ in 0..<5 { await Task.yield() }
+    }
+
+    private final class SuspendingMediaCache: MediaCache {
+        private let suspendsRead: Bool
+        private var continuation: CheckedContinuation<Void, Never>?
+        private(set) var isWaiting = false
+        private(set) var didResume = false
+
+        init(suspendsRead: Bool) { self.suspendsRead = suspendsRead }
+
+        func value(for key: MediaCacheKey) async -> MediaCachePayload? {
+            if suspendsRead { await suspend() }
+            return nil
+        }
+
+        func store(_ payload: MediaCachePayload, for key: MediaCacheKey) async {
+            if !suspendsRead { await suspend() }
+        }
+
+        func removeAll() async {}
+
+        private func suspend() async {
+            await withCheckedContinuation { continuation in
+                self.continuation = continuation
+                isWaiting = true
+            }
+            didResume = true
+        }
+
+        func resume() {
+            continuation?.resume()
+            continuation = nil
+        }
+    }
+
     private final class RecordingLyricsProvider: LyricsProvider {
         let displayName = "Recording lyrics provider"
         private(set) var requestedTrackIDs: [String] = []
@@ -428,7 +588,9 @@ final class ProviderPipelineControllerTests: XCTestCase {
         let displayName = "Controllable lyrics provider"
         private let document: LyricsDocument
         private let started: XCTestExpectation
-        private var continuation: CheckedContinuation<Void, Never>?
+        private var continuations: [CheckedContinuation<Void, Never>?] = []
+        private(set) var requestedTrackIDs: [String] = []
+        private(set) var completedRequestCount = 0
 
         init(
             document: LyricsDocument,
@@ -439,16 +601,18 @@ final class ProviderPipelineControllerTests: XCTestCase {
         }
 
         func lyrics(for track: NowPlayingTrack) async -> LyricsProviderResult {
+            requestedTrackIDs.append(track.id)
             await withCheckedContinuation { continuation in
-                self.continuation = continuation
+                continuations.append(continuation)
                 started.fulfill()
             }
+            completedRequestCount += 1
             return .available(document)
         }
 
-        func complete() {
-            continuation?.resume()
-            continuation = nil
+        func complete(index: Int = 0) {
+            continuations[index]?.resume()
+            continuations[index] = nil
         }
     }
 
@@ -486,7 +650,9 @@ final class ProviderPipelineControllerTests: XCTestCase {
         let displayName = "Controllable translation provider"
         private let started: XCTestExpectation
         private let returned: XCTestExpectation?
-        private var continuation: CheckedContinuation<TranslationProviderResult, Never>?
+        private var continuations: [CheckedContinuation<TranslationProviderResult, Never>?] = []
+        private(set) var requestCount = 0
+        private(set) var completedRequestCount = 0
 
         init(
             started: XCTestExpectation,
@@ -500,17 +666,19 @@ final class ProviderPipelineControllerTests: XCTestCase {
             for document: LyricsDocument,
             targetLanguageIdentifier: String
         ) async -> TranslationProviderResult {
+            requestCount += 1
             let result = await withCheckedContinuation { continuation in
-                self.continuation = continuation
+                continuations.append(continuation)
                 started.fulfill()
             }
+            completedRequestCount += 1
             returned?.fulfill()
             return result
         }
 
-        func complete(with result: TranslationProviderResult) {
-            continuation?.resume(returning: result)
-            continuation = nil
+        func complete(with result: TranslationProviderResult, index: Int = 0) {
+            continuations[index]?.resume(returning: result)
+            continuations[index] = nil
         }
     }
 

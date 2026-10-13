@@ -30,7 +30,7 @@ private final class MusicFloatAppController {
     private let launchesInLiveMode = CommandLine.arguments.contains("--live")
     private let autoHideOverlayDelay: TimeInterval?
     private let mediaCache: any UserControllableMediaCache
-    private let liveProviderPipelineControllerStore: LiveProviderPipelineControllerStore
+    private var liveProviderPipelineController: ProviderPipelineController?
     private let panelController: FloatingPanelController
     private let playerController: PlayerController
     private let mockProviderPipelineController: ProviderPipelineController
@@ -58,7 +58,6 @@ private final class MusicFloatAppController {
         mediaCache = DiskBackedMediaCache(
             diskPersistenceEnabled: UserDefaults.standard.object(forKey: "diskMediaCacheEnabled") as? Bool ?? false
         )
-        liveProviderPipelineControllerStore = LiveProviderPipelineControllerStore(mediaCache: mediaCache)
         panelController = FloatingPanelController()
 
         let mockAdapters = RuntimeAdapterFactory.makeAdapters(for: .architectureDefault)
@@ -153,9 +152,9 @@ private final class MusicFloatAppController {
         stopLiveVisibleLyricsRefreshLoop()
         mockProviderPipelineController.stopHiddenWork(appState: appState)
         if appState.reduceHiddenMemoryUsage {
-            liveProviderPipelineControllerStore.release(appState: appState)
+            releaseLiveProviderPipelineController()
         } else {
-            liveProviderPipelineControllerStore.current?.stopHiddenWork(appState: appState)
+            liveProviderPipelineController?.stopHiddenWork(appState: appState)
         }
         playerController.stopMockPreview(appState: appState)
         playerController.stopLiveAppleMusic(appState: appState)
@@ -259,7 +258,7 @@ private final class MusicFloatAppController {
         AppTelemetry.windowing.info("Hide overlay requested reason=\(reason, privacy: .public)")
         stopLiveVisibleLyricsRefreshLoop()
         mockProviderPipelineController.stopHiddenWork(appState: appState)
-        liveProviderPipelineControllerStore.current?.stopHiddenWork(appState: appState)
+        liveProviderPipelineController?.stopHiddenWork(appState: appState)
         playerController.stopMockPreview(appState: appState)
         playerController.overlayVisibilityChanged(false, appState: appState)
         panelController.hide(releaseResources: appState.reduceHiddenMemoryUsage)
@@ -284,9 +283,9 @@ private final class MusicFloatAppController {
             stopLiveVisibleLyricsRefreshLoop()
             playerController.stopLiveAppleMusic(appState: appState)
             if appState.reduceHiddenMemoryUsage {
-                liveProviderPipelineControllerStore.release(appState: appState)
+                releaseLiveProviderPipelineController()
             } else {
-                liveProviderPipelineControllerStore.current?.stopHiddenWork(appState: appState)
+                liveProviderPipelineController?.stopHiddenWork(appState: appState)
             }
             artworkProvider.cancel(appState: appState) { [weak self] in
                 self?.statusItemController.refreshStatusIcon()
@@ -347,7 +346,7 @@ private final class MusicFloatAppController {
             return
         }
         let providerPipelineController = liveProviderPipelineController
-            ?? liveProviderPipelineControllerStore.current
+            ?? self.liveProviderPipelineController
         guard let providerPipelineController else {
             return
         }
@@ -438,7 +437,7 @@ private final class MusicFloatAppController {
         AppTelemetry.lifecycle.info("Quit requested from menu bar")
         stopLiveVisibleLyricsRefreshLoop()
         mockProviderPipelineController.stopHiddenWork(appState: appState)
-        liveProviderPipelineControllerStore.current?.stopHiddenWork(appState: appState)
+        liveProviderPipelineController?.stopHiddenWork(appState: appState)
         playerController.stopMockPreview(appState: appState)
         playerController.stopLiveAppleMusic(appState: appState)
         artworkProvider.cancel(appState: appState) { [weak self] in
@@ -453,7 +452,23 @@ private final class MusicFloatAppController {
     }
 
     private func getLiveProviderPipelineController() -> ProviderPipelineController {
-        liveProviderPipelineControllerStore.get()
+        if let liveProviderPipelineController { return liveProviderPipelineController }
+        let adapters = RuntimeAdapterFactory.makeAdapters(for: .liveAppleMusic)
+        let controller = ProviderPipelineController(
+            lyricsProvider: adapters.lyricsProvider,
+            translationProvider: adapters.translationProvider,
+            mediaCache: mediaCache
+        )
+        liveProviderPipelineController = controller
+        AppTelemetry.lifecycle.info("Live provider pipeline initialized")
+        return controller
+    }
+
+    private func releaseLiveProviderPipelineController() {
+        guard let liveProviderPipelineController else { return }
+        liveProviderPipelineController.stopHiddenWork(appState: appState)
+        self.liveProviderPipelineController = nil
+        AppTelemetry.lifecycle.info("Live provider pipeline released")
     }
 
     private static func nanoseconds(for interval: TimeInterval) -> UInt64 {
@@ -491,38 +506,5 @@ private final class MusicFloatAppController {
         }
         guard let value = TimeInterval(trimmed), value > 0 else { return nil }
         return value
-    }
-}
-
-@MainActor
-private final class LiveProviderPipelineControllerStore {
-    private(set) var current: ProviderPipelineController?
-    private let mediaCache: any MediaCache
-
-    init(mediaCache: any MediaCache) {
-        self.mediaCache = mediaCache
-    }
-
-    func get() -> ProviderPipelineController {
-        if let current {
-            return current
-        }
-
-        let liveAdapters = RuntimeAdapterFactory.makeAdapters(for: .liveAppleMusic)
-        let controller = ProviderPipelineController(
-            lyricsProvider: liveAdapters.lyricsProvider,
-            translationProvider: liveAdapters.translationProvider,
-            mediaCache: mediaCache
-        )
-        current = controller
-        AppTelemetry.lifecycle.info("Live provider pipeline initialized")
-        return controller
-    }
-
-    func release(appState: AppState) {
-        guard let current else { return }
-        current.stopHiddenWork(appState: appState)
-        self.current = nil
-        AppTelemetry.lifecycle.info("Live provider pipeline released")
     }
 }

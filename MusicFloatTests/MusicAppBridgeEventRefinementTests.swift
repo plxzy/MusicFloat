@@ -191,7 +191,7 @@ final class MusicAppBridgeEventRefinementTests: XCTestCase {
 
     func testResumeAfterPauseWithoutSnapshotStartsFromPreservedElapsed() {
         let lastEmittedAt = Date()
-        let now = lastEmittedAt.addingTimeInterval(1.5)
+        let now = lastEmittedAt.addingTimeInterval(600)
         let previous = PlayerState(
             playbackStatus: .paused,
             track: Self.track(id: "track-1"),
@@ -215,6 +215,33 @@ final class MusicAppBridgeEventRefinementTests: XCTestCase {
 
         XCTAssertEqual(refined.state.playbackStatus, .playing)
         XCTAssertEqual(refined.state.track?.id, "track-1")
+        XCTAssertEqual(refined.state.elapsedTime, 81, accuracy: 0.001)
+    }
+
+    func testPlayingSameTrackWithoutSnapshotAdvancesElapsed() {
+        let lastEmittedAt = Date()
+        let now = lastEmittedAt.addingTimeInterval(1.5)
+        let previous = PlayerState(
+            playbackStatus: .playing,
+            track: Self.track(id: "track-1"),
+            elapsedTime: 81,
+            updatedAt: lastEmittedAt
+        )
+        let event = PlayerState(
+            playbackStatus: .playing,
+            track: previous.track,
+            elapsedTime: 0,
+            updatedAt: now
+        )
+
+        let refined = PublicAppleMusicAppBridge.refinePlayerInfoEvent(
+            event: event,
+            lastEmittedState: previous,
+            lastEmittedAt: lastEmittedAt,
+            snapshot: nil,
+            now: now
+        )
+
         XCTAssertEqual(refined.state.elapsedTime, 82.5, accuracy: 0.001)
     }
 

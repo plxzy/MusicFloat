@@ -35,6 +35,7 @@ final class PlayerController {
     private var liveTickTask: Task<Void, Never>?
     private var liveVisibilityRefreshTask: Task<Void, Never>?
     private var liveBridge: (any MusicAppBridge)?
+    private var liveSessionID: UUID?
     private var liveTrackChangedCallback: (@MainActor (NowPlayingTrack?) -> Void)?
     private let syncEngine = LyricsSyncEngine()
 
@@ -62,7 +63,9 @@ final class PlayerController {
         stopMockPreview(appState: appState)
 
         let bridge = liveBridgeFactory()
+        let sessionID = UUID()
         liveBridge = bridge
+        liveSessionID = sessionID
         liveTrackChangedCallback = onTrackChanged
         appState.setLiveModeRunning(true)
         AppTelemetry.performance.info("Live Apple Music bridge started")
@@ -71,7 +74,10 @@ final class PlayerController {
             guard let self, let appState else { return }
 
             let initial = await bridge.currentState()
-            appState.setMusicVolume(await bridge.currentVolume())
+            guard !Task.isCancelled, self.liveSessionID == sessionID else { return }
+            let volume = await bridge.currentVolume()
+            guard !Task.isCancelled, self.liveSessionID == sessionID else { return }
+            appState.setMusicVolume(volume)
             AppTelemetry.performance.info(
                 "Live prime: status=\(initial.playbackStatus.rawValue, privacy: .public) hasTrack=\(initial.track != nil) elapsed=\(initial.elapsedTime) musicRunning=\(AppleMusicEventListener.isMusicAppRunning)"
             )
@@ -81,7 +87,7 @@ final class PlayerController {
             onTrackChanged?(initial.track)
 
             for await state in bridge.events() {
-                if Task.isCancelled { break }
+                guard !Task.isCancelled, self.liveSessionID == sessionID else { break }
                 let previousTrackID = appState.playerState.track?.id
                 let incomingTrackID = state.track?.id
                 let isSameTrack = incomingTrackID != nil && incomingTrackID == previousTrackID
@@ -109,7 +115,6 @@ final class PlayerController {
                 // play/pause/skip/seek doesn't leave the active line behind.
                 self.restartLiveTick(appState: appState)
             }
-            _ = self
         }
     }
 
@@ -126,6 +131,7 @@ final class PlayerController {
         liveVisibilityRefreshTask?.cancel()
         liveVisibilityRefreshTask = nil
         liveBridge = nil
+        liveSessionID = nil
         liveTrackChangedCallback = nil
         appState?.setMusicVolume(nil)
         appState?.setPlaybackCommandInFlight(false)
@@ -145,7 +151,7 @@ final class PlayerController {
             )
             return nil
         }
-        guard appState.isLiveModeRunning, let liveBridge else {
+        guard appState.isLiveModeRunning, let liveBridge, let sessionID = liveSessionID else {
             AppTelemetry.performance.notice(
                 "Playback command ignored because live mode is unavailable command=\(command.telemetryName, privacy: .public)"
             )
@@ -163,10 +169,13 @@ final class PlayerController {
         )
         appState.setPlaybackCommandInFlight(true)
         defer {
-            appState.setPlaybackCommandInFlight(false)
+            if liveSessionID == sessionID {
+                appState.setPlaybackCommandInFlight(false)
+            }
         }
 
         let result = await liveBridge.perform(command)
+        guard !Task.isCancelled, liveSessionID == sessionID else { return nil }
         guard result.isSuccess else {
             logPlaybackCommandFailure(result, command: command)
             return nil
@@ -178,18 +187,21 @@ final class PlayerController {
 
         if case .setVolume(let volume) = command {
             appState.setMusicVolume(volume)
-            if let refreshedVolume = await liveBridge.currentVolume() {
+            let refreshedVolume = await liveBridge.currentVolume()
+            guard !Task.isCancelled, liveSessionID == sessionID else { return nil }
+            if let refreshedVolume {
                 appState.setMusicVolume(refreshedVolume)
             }
             return nil
         }
 
         let previousTrackID = appState.playerState.track?.id
-        let refreshedState = await refreshedStateAfterPlaybackCommand(
+        guard let refreshedState = await refreshedStateAfterPlaybackCommand(
             command,
             previousTrackID: previousTrackID,
-            bridge: liveBridge
-        )
+            bridge: liveBridge,
+            sessionID: sessionID
+        ), !Task.isCancelled, liveSessionID == sessionID else { return nil }
         appState.updatePlayerState(refreshedState)
         if refreshedState.track?.id != previousTrackID {
             liveTrackChangedCallback?(refreshedState.track)
@@ -216,9 +228,11 @@ final class PlayerController {
     private func refreshedStateAfterPlaybackCommand(
         _ command: MusicPlaybackCommand,
         previousTrackID: String?,
-        bridge: any MusicAppBridge
-    ) async -> PlayerState {
+        bridge: any MusicAppBridge,
+        sessionID: UUID
+    ) async -> PlayerState? {
         var latestState = await bridge.currentState()
+        guard !Task.isCancelled, liveSessionID == sessionID else { return nil }
 
         let shouldWaitForChangedSnapshot: (PlayerState) -> Bool = { state in
             switch command {
@@ -235,7 +249,9 @@ final class PlayerController {
 
         for _ in 1..<Self.commandRefreshAttempts where shouldWaitForChangedSnapshot(latestState) {
             try? await Task.sleep(nanoseconds: Self.commandRefreshDelayNanoseconds)
+            guard !Task.isCancelled, liveSessionID == sessionID else { return nil }
             latestState = await bridge.currentState()
+            guard !Task.isCancelled, liveSessionID == sessionID else { return nil }
         }
 
         return latestState
@@ -307,7 +323,9 @@ final class PlayerController {
         liveTickTask?.cancel()
         liveTickTask = nil
 
-        guard appState.isOverlayVisible,
+        guard liveSessionID != nil,
+              appState.isLiveModeRunning,
+              appState.isOverlayVisible,
               appState.playerState.playbackStatus == .playing,
               appState.playerState.track != nil else {
             return
@@ -460,6 +478,7 @@ final class PlayerController {
             guard let self, let appState else { return }
 
             let initialState = await bridge.currentState()
+            guard !Task.isCancelled else { return }
             appState.updatePlayerState(initialState)
             var playbackClock = PlaybackClock(initialState: initialState)
             var currentState = initialState

@@ -118,12 +118,6 @@ enum PublicAppleMusicArtworkProvider {
         return thumbnailData
     }
 
-    static func currentTrackArtwork() async -> NSImage? {
-        guard let thumbnailData = await currentTrackArtworkData() else {
-            return nil
-        }
-        return NSImage(data: thumbnailData)
-    }
 }
 
 enum ArtworkImageProcessor {

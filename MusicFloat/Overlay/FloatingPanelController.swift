@@ -36,12 +36,14 @@ final class FloatingPanelController: NSObject {
             )
             self.panel = panel
             installScreenChangeObserverIfNeeded()
-            updateContent(
-                appState: appState,
-                onTranslationPreparationCompleted: onTranslationPreparationCompleted,
-                playbackCommands: playbackCommands,
-                in: panel
-            )
+            if !didCreatePanel {
+                updateContent(
+                    appState: appState,
+                    onTranslationPreparationCompleted: onTranslationPreparationCompleted,
+                    playbackCommands: playbackCommands,
+                    in: panel
+                )
+            }
             applySize(appState: appState, to: panel)
 
             AppTelemetry.windowing.info("Show floating panel created=\(didCreatePanel)")

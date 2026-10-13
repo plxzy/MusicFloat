@@ -20,21 +20,6 @@ enum AppleMusicEventListener {
         let sanitizedSummary: String
     }
 
-    /// An async stream of player states derived from `playerInfo` notifications.
-    /// The stream terminates when the consumer cancels.
-    static func makeStream() -> AsyncStream<PlayerState> {
-        let eventStream = makePlayerInfoStream()
-        return AsyncStream(bufferingPolicy: .bufferingNewest(8)) { continuation in
-            let task = Task {
-                for await event in eventStream {
-                    continuation.yield(event.state)
-                }
-                continuation.finish()
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-
     /// An async stream of raw-enough playerInfo events for diagnostics plus the
     /// parsed state used by production code.
     static func makePlayerInfoStream() -> AsyncStream<PlayerInfoEvent> {

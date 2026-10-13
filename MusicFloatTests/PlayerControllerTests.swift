@@ -448,6 +448,110 @@ final class PlayerControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testStoppedLivePrimeDoesNotPublishDelayedSnapshot() async throws {
+        let defaults = UserDefaults(suiteName: "MusicFloatTests.stoppedLivePrime.\(UUID().uuidString)")!
+        let appState = AppState(userDefaults: defaults)
+        let bridge = RecordingMusicBridge(states: [])
+        var pendingSnapshot: CheckedContinuation<PlayerState, Never>?
+        var snapshotReturned = false
+        bridge.stateHandler = {
+            let snapshot = await withCheckedContinuation { pendingSnapshot = $0 }
+            snapshotReturned = true
+            return snapshot
+        }
+        let controller = PlayerController(bridge: MockMusicAppBridge(), liveBridgeFactory: { bridge })
+        var trackChangeCount = 0
+        controller.startLiveAppleMusic(appState: appState) { _ in trackChangeCount += 1 }
+        try await waitUntil { pendingSnapshot != nil }
+
+        controller.stopLiveAppleMusic(appState: appState)
+        let stoppedState = appState.playerState
+        try XCTUnwrap(pendingSnapshot).resume(returning: MockMusicAppBridge.previewState)
+        try await waitUntil { snapshotReturned }
+        await Task.yield()
+
+        XCTAssertEqual(appState.playerState, stoppedState)
+        XCTAssertFalse(appState.isLiveModeRunning)
+        XCTAssertEqual(trackChangeCount, 0)
+    }
+
+    @MainActor
+    func testOldCommandCompletionDoesNotClearReplacementCommandOrState() async throws {
+        let defaults = UserDefaults(suiteName: "MusicFloatTests.oldCommandCompletion.\(UUID().uuidString)")!
+        let appState = AppState(userDefaults: defaults)
+        let oldBridge = RecordingMusicBridge(states: [MockMusicAppBridge.previewState])
+        let replacementState = PlayerState(
+            playbackStatus: .paused, track: MockMusicAppBridge.previewTrack,
+            elapsedTime: 12, updatedAt: Date()
+        )
+        let newBridge = RecordingMusicBridge(states: [replacementState])
+        newBridge.reportedVolume = 30
+        let controller = PlayerController(bridge: MockMusicAppBridge(), liveBridgeFactory: {
+            oldBridge.currentStateCallCount == 0 ? oldBridge : newBridge
+        })
+        defer { controller.stopLiveAppleMusic(appState: appState) }
+        controller.startLiveAppleMusic(appState: appState)
+        await waitForCurrentStateCall(on: oldBridge)
+
+        var oldCompletion: CheckedContinuation<MusicPlaybackCommandResult, Never>?
+        oldBridge.commandHandler = { await withCheckedContinuation { oldCompletion = $0 } }
+        let oldCommand = Task { await controller.performLivePlaybackCommand(.playPause, appState: appState) }
+        try await waitUntil { oldCompletion != nil }
+        controller.stopLiveAppleMusic(appState: appState)
+        controller.startLiveAppleMusic(appState: appState)
+        await waitForCurrentStateCall(on: newBridge)
+
+        var newCompletion: CheckedContinuation<MusicPlaybackCommandResult, Never>?
+        newBridge.commandHandler = { await withCheckedContinuation { newCompletion = $0 } }
+        let newCommand = Task { await controller.performLivePlaybackCommand(.setVolume(30), appState: appState) }
+        try await waitUntil { newCompletion != nil }
+        try XCTUnwrap(oldCompletion).resume(returning: .succeeded)
+        let oldResult = await oldCommand.value
+
+        XCTAssertNil(oldResult)
+        XCTAssertEqual(appState.playerState, replacementState)
+        XCTAssertTrue(appState.isPlaybackCommandInFlight)
+        XCTAssertEqual(oldBridge.currentStateCallCount, 1)
+        try XCTUnwrap(newCompletion).resume(returning: .succeeded)
+        _ = await newCommand.value
+        XCTAssertEqual(appState.musicVolume, 30)
+        XCTAssertFalse(appState.isPlaybackCommandInFlight)
+    }
+
+    @MainActor
+    func testOldCommandSnapshotDoesNotOverwriteRestartedLiveSession() async throws {
+        let defaults = UserDefaults(suiteName: "MusicFloatTests.oldCommandSnapshot.\(UUID().uuidString)")!
+        let appState = AppState(userDefaults: defaults)
+        let oldBridge = RecordingMusicBridge(states: [MockMusicAppBridge.previewState])
+        let replacementState = PlayerState(
+            playbackStatus: .paused, track: MockMusicAppBridge.previewTrack,
+            elapsedTime: 12, updatedAt: Date()
+        )
+        let newBridge = RecordingMusicBridge(states: [replacementState])
+        let controller = PlayerController(bridge: MockMusicAppBridge(), liveBridgeFactory: {
+            oldBridge.currentStateCallCount == 0 ? oldBridge : newBridge
+        })
+        defer { controller.stopLiveAppleMusic(appState: appState) }
+        controller.startLiveAppleMusic(appState: appState)
+        await waitForCurrentStateCall(on: oldBridge)
+
+        var pendingSnapshot: CheckedContinuation<PlayerState, Never>?
+        oldBridge.stateHandler = { await withCheckedContinuation { pendingSnapshot = $0 } }
+        let command = Task { await controller.performLivePlaybackCommand(.playPause, appState: appState) }
+        try await waitUntil { pendingSnapshot != nil }
+        controller.stopLiveAppleMusic(appState: appState)
+        controller.startLiveAppleMusic(appState: appState)
+        await waitForCurrentStateCall(on: newBridge)
+        try XCTUnwrap(pendingSnapshot).resume(returning: MockMusicAppBridge.previewState)
+        let result = await command.value
+
+        XCTAssertNil(result)
+        XCTAssertEqual(appState.playerState, replacementState)
+        XCTAssertTrue(appState.isLiveModeRunning)
+        XCTAssertFalse(appState.isPlaybackCommandInFlight)
+    }
+
+    @MainActor
     private func waitForCurrentStateCall(on bridge: RecordingMusicBridge) async {
         for _ in 0..<20 {
             if bridge.currentStateCallCount > 0 {
@@ -480,6 +584,8 @@ private final class RecordingMusicBridge: MusicAppBridge {
     var commands: [MusicPlaybackCommand] = []
     var commandResult: MusicPlaybackCommandResult = .succeeded
     var reportedVolume: Int?
+    var stateHandler: (@MainActor () async -> PlayerState)?
+    var commandHandler: (@MainActor () async -> MusicPlaybackCommandResult)?
     private(set) var currentStateCallCount = 0
 
     init(states: [PlayerState]) {
@@ -488,6 +594,7 @@ private final class RecordingMusicBridge: MusicAppBridge {
 
     func currentState() async -> PlayerState {
         currentStateCallCount += 1
+        if let stateHandler { return await stateHandler() }
         guard !states.isEmpty else {
             return .disconnected
         }
@@ -496,6 +603,7 @@ private final class RecordingMusicBridge: MusicAppBridge {
 
     func perform(_ command: MusicPlaybackCommand) async -> MusicPlaybackCommandResult {
         commands.append(command)
+        if let commandHandler { return await commandHandler() }
         return commandResult
     }
 

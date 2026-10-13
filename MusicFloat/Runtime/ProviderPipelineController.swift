@@ -18,6 +18,8 @@ final class ProviderPipelineController {
     private let mediaCache: any MediaCache
     private var loadTask: Task<Void, Never>?
     private var translationTask: Task<Void, Never>?
+    private var loadRequestID: UUID?
+    private var translationRequestID: UUID?
     private var loadingTrackID: String?
     private var lastIntegratedVisibleLyricsRefresh = Date.distantPast
     private var consecutiveIntegratedVisibleLyricsMisses = 0
@@ -56,6 +58,8 @@ final class ProviderPipelineController {
             appState.setOverlayContentState(.loading)
             cancelTranslationTask(appState: appState)
             loadingTrackID = requestedTrackID
+            let requestID = UUID()
+            loadRequestID = requestID
 
             loadTask = Task { @MainActor [weak self, weak appState, track] in
                 await AppTelemetry.measure("ProviderPipelineController.prepareOverlayContent.load") {
@@ -64,16 +68,20 @@ final class ProviderPipelineController {
                     }
 
                     defer {
-                        self.loadingTrackID = nil
-                        self.loadTask = nil
+                        if self.loadRequestID == requestID {
+                            self.loadingTrackID = nil
+                            self.loadTask = nil
+                            self.loadRequestID = nil
+                        }
                     }
+                    guard !Task.isCancelled, self.loadRequestID == requestID else { return }
 
                     let startedAt = Date()
                     let lyricsResult = await self.lyricsProvider.lyrics(for: track)
                     AppTelemetry.performance.notice(
                         "Provider lyrics load finished track=\(NowPlayingTrack.telemetryID(for: requestedTrackID), privacy: .public) elapsed=\(Date().timeIntervalSince(startedAt), privacy: .public)"
                     )
-                    guard !Task.isCancelled else {
+                    guard !Task.isCancelled, self.loadRequestID == requestID else {
                         return
                     }
                     guard appState.playerState.track?.id == requestedTrackID else {
@@ -114,9 +122,7 @@ final class ProviderPipelineController {
             AppTelemetry.performance.notice("Provider refresh skipped; same track already loading track=\(NowPlayingTrack.telemetryID(for: trackID), privacy: .public)")
             return
         }
-        loadTask?.cancel()
-        loadTask = nil
-        loadingTrackID = nil
+        cancelLoadTask()
         cancelTranslationTask(appState: appState)
         lastIntegratedVisibleLyricsRefresh = .distantPast
         consecutiveIntegratedVisibleLyricsMisses = 0
@@ -173,6 +179,10 @@ final class ProviderPipelineController {
                 appState.applyProviderReady()
             }
             refreshIntegratedVisibleLyrics(appState: appState)
+            if appState.translation.lines.isEmpty,
+               let trackID = appState.playerState.track?.id {
+                startTranslation(for: appState.lyricsDocument, requestedTrackID: trackID, appState: appState)
+            }
             AppTelemetry.performance.info("Live provider resume reused visible lyrics document")
             return
         }
@@ -183,9 +193,7 @@ final class ProviderPipelineController {
     func cancelInFlightLoadPreservingState(appState: AppState) {
         guard loadTask != nil || translationTask != nil else { return }
         AppTelemetry.performance.info("Provider pipeline load cancelled because live track payload is empty")
-        loadTask?.cancel()
-        loadTask = nil
-        loadingTrackID = nil
+        cancelLoadTask()
         cancelTranslationTask(appState: appState)
     }
 
@@ -382,15 +390,10 @@ final class ProviderPipelineController {
         consecutiveIntegratedVisibleLyricsMisses = 0
         cancelTranslationTask(appState: appState)
 
-        guard loadTask != nil else {
-            appState.setProviderRuntimeState(.idle)
-            return
+        if loadTask != nil {
+            AppTelemetry.performance.info("Provider pipeline load cancelled while overlay hidden")
         }
-
-        AppTelemetry.performance.info("Provider pipeline mock load cancelled")
-        loadTask?.cancel()
-        loadTask = nil
-        loadingTrackID = nil
+        cancelLoadTask()
         appState.setProviderRuntimeState(.idle)
     }
 
@@ -405,6 +408,8 @@ final class ProviderPipelineController {
         }
         guard translationTask == nil else { return }
 
+        let requestID = UUID()
+        translationRequestID = requestID
         appState.setTranslationRuntimeState(.checkingAvailability)
         let targetLanguageIdentifier = appState.preferredTranslationLanguageIdentifier
         let translationCacheKey = Self.translationCacheKey(
@@ -418,18 +423,25 @@ final class ProviderPipelineController {
         translationTask = Task { @MainActor [weak self, weak appState] in
             guard let self, let appState else { return }
             defer {
-                self.translationTask = nil
+                if self.translationRequestID == requestID {
+                    self.translationTask = nil
+                    self.translationRequestID = nil
+                }
             }
 
-            if let cachedTranslation = await self.cachedTranslation(for: translationCacheKey) {
-                guard !Task.isCancelled else {
-                    return
-                }
-                guard appState.playerState.track?.id == requestedTrackID,
-                      appState.preferredTranslationLanguageIdentifier == targetLanguageIdentifier else {
-                    AppTelemetry.performance.info("Cached translation ignored because live context changed")
-                    return
-                }
+            @MainActor func isCurrentRequest() -> Bool {
+                !Task.isCancelled
+                    && self.translationRequestID == requestID
+                    && appState.playerState.track?.id == requestedTrackID
+                    && appState.preferredTranslationLanguageIdentifier == targetLanguageIdentifier
+                    && appState.showsTranslation
+                    && appState.lyricsDocument.hasSameTranslationContent(as: document)
+            }
+
+            guard isCurrentRequest() else { return }
+            let cachedTranslation = await self.cachedTranslation(for: translationCacheKey)
+            guard isCurrentRequest() else { return }
+            if let cachedTranslation {
                 AppTelemetry.performance.notice(
                     "Translation cache hit target=\(cachedTranslation.targetLanguageIdentifier, privacy: .public) lines=\(cachedTranslation.lines.count, privacy: .public)"
                 )
@@ -443,17 +455,7 @@ final class ProviderPipelineController {
                 for: document,
                 targetLanguageIdentifier: targetLanguageIdentifier
             )
-            guard !Task.isCancelled else {
-                return
-            }
-            guard appState.playerState.track?.id == requestedTrackID else {
-                AppTelemetry.performance.info("Translation result ignored because live track changed before translation completed")
-                return
-            }
-            guard appState.preferredTranslationLanguageIdentifier == targetLanguageIdentifier else {
-                AppTelemetry.performance.info("Translation result ignored because target language changed")
-                return
-            }
+            guard isCurrentRequest() else { return }
 
             switch translationResult {
             case .available(let translation):
@@ -462,6 +464,7 @@ final class ProviderPipelineController {
                     "Translation ready track=\(NowPlayingTrack.telemetryID(for: requestedTrackID), privacy: .public) source=\(sourceLanguageIdentifier, privacy: .public) target=\(translation.targetLanguageIdentifier, privacy: .public) lines=\(translation.lines.count, privacy: .public)"
                 )
                 await self.storeTranslation(translation, for: translationCacheKey)
+                guard isCurrentRequest() else { return }
                 appState.applyTranslation(translation)
                 appState.setTranslationRuntimeState(.ready)
             case .status(let state):
@@ -533,6 +536,14 @@ final class ProviderPipelineController {
         guard translationTask != nil else { return }
         translationTask?.cancel()
         translationTask = nil
+        translationRequestID = nil
         appState.setTranslationRuntimeState(.unavailable(reason: "Translation cancelled"))
+    }
+
+    private func cancelLoadTask() {
+        loadTask?.cancel()
+        loadTask = nil
+        loadingTrackID = nil
+        loadRequestID = nil
     }
 }

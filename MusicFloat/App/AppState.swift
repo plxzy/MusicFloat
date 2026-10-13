@@ -134,92 +134,67 @@ struct LyricsOverlaySnapshotBuilder: Sendable {
         widthPreset: OverlayWidthPreset,
         lyricOffsetSeconds: Double = 0
     ) -> LyricsOverlaySnapshot {
-        let trackText = playerState.track?.displayTitle ?? "Waiting for playback"
+        let effectiveLyricTime = playerState.elapsedTime + lyricOffsetSeconds + lyricsDocument.offsetCorrection
+        let statusText: String
+        let lyricText: String
+        let attributionText: String
+        var activeLine: LyricLine?
+        var lyricWindow: [LyricsOverlayLine] = []
+        var translationText: String?
 
         switch contentState {
         case .loading:
-            return LyricsOverlaySnapshot(
-                contentState: contentState,
-                statusText: "Preparing lyrics",
-                trackText: trackText,
-                lyricText: "Listening for a mock playback snapshot...",
-                activeLine: nil,
-                effectiveLyricTime: playerState.elapsedTime + lyricOffsetSeconds + lyricsDocument.offsetCorrection,
-                lyricClockReferenceDate: playerState.updatedAt,
-                isLyricClockRunning: playerState.playbackStatus == .playing,
-                lyricWindow: [],
-                translationText: nil,
-                attributionText: "Mock pipeline",
-                widthPreset: widthPreset
-            )
+            statusText = "Preparing lyrics"
+            lyricText = "Listening for a mock playback snapshot..."
+            attributionText = "Mock pipeline"
         case .unavailable:
-            return LyricsOverlaySnapshot(
-                contentState: contentState,
-                statusText: playerState.statusLine,
-                trackText: trackText,
-                lyricText: "Lyrics unavailable for this track",
-                activeLine: nil,
-                effectiveLyricTime: playerState.elapsedTime + lyricOffsetSeconds + lyricsDocument.offsetCorrection,
-                lyricClockReferenceDate: playerState.updatedAt,
-                isLyricClockRunning: playerState.playbackStatus == .playing,
-                lyricWindow: [],
-                translationText: showsTranslation ? "Translation will wait for lyrics" : nil,
-                attributionText: "No provider result",
-                widthPreset: widthPreset
-            )
+            statusText = playerState.statusLine
+            lyricText = "Lyrics unavailable for this track"
+            translationText = showsTranslation ? "Translation will wait for lyrics" : nil
+            attributionText = "No provider result"
         case .failed(let message):
-            return LyricsOverlaySnapshot(
-                contentState: contentState,
-                statusText: "Provider error",
-                trackText: trackText,
-                lyricText: message,
-                activeLine: nil,
-                effectiveLyricTime: playerState.elapsedTime + lyricOffsetSeconds + lyricsDocument.offsetCorrection,
-                lyricClockReferenceDate: playerState.updatedAt,
-                isLyricClockRunning: playerState.playbackStatus == .playing,
-                lyricWindow: [],
-                translationText: nil,
-                attributionText: "Mock failure state",
-                widthPreset: widthPreset
-            )
+            statusText = "Provider error"
+            lyricText = message
+            attributionText = "Mock failure state"
         case .ready:
-            let effectiveLyricTime = playerState.elapsedTime + lyricOffsetSeconds + lyricsDocument.offsetCorrection
-            let activeLine = syncEngine.activeLine(
+            statusText = playerState.statusLine
+            activeLine = syncEngine.activeLine(
                 in: lyricsDocument,
                 at: playerState.elapsedTime + lyricOffsetSeconds,
                 duration: playerState.track?.duration
             )
-            let lyricText = activeLine?.text ?? "Lyrics unavailable"
-            let translationText = activeLine.flatMap { line in
+            lyricText = activeLine?.text ?? "Lyrics unavailable"
+            translationText = activeLine.flatMap { line in
                 showsTranslation ? translation.text(for: line) : nil
             }
-            let lyricWindow = Self.lyricWindow(
+            lyricWindow = Self.lyricWindow(
                 in: lyricsDocument,
                 activeLine: activeLine,
                 effectiveLyricTime: effectiveLyricTime,
                 translation: translation,
                 showsTranslation: showsTranslation
             )
-
-            return LyricsOverlaySnapshot(
-                contentState: contentState,
-                statusText: playerState.statusLine,
-                trackText: trackText,
-                lyricText: lyricText,
-                activeLine: activeLine,
-                effectiveLyricTime: effectiveLyricTime,
-                lyricClockReferenceDate: playerState.updatedAt,
-                isLyricClockRunning: playerState.playbackStatus == .playing,
-                lyricWindow: lyricWindow,
-                translationText: translationText,
-                attributionText: Self.attributionText(
-                    lyricsDocument: lyricsDocument,
-                    translation: translation,
-                    showsTranslation: showsTranslation
-                ),
-                widthPreset: widthPreset
+            attributionText = Self.attributionText(
+                lyricsDocument: lyricsDocument,
+                translation: translation,
+                showsTranslation: showsTranslation
             )
         }
+
+        return LyricsOverlaySnapshot(
+            contentState: contentState,
+            statusText: statusText,
+            trackText: playerState.track?.displayTitle ?? "Waiting for playback",
+            lyricText: lyricText,
+            activeLine: activeLine,
+            effectiveLyricTime: effectiveLyricTime,
+            lyricClockReferenceDate: playerState.updatedAt,
+            isLyricClockRunning: playerState.playbackStatus == .playing,
+            lyricWindow: lyricWindow,
+            translationText: translationText,
+            attributionText: attributionText,
+            widthPreset: widthPreset
+        )
     }
 
     private static func lyricWindow(

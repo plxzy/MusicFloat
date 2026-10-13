@@ -6,6 +6,43 @@ the status as fixes land or evidence changes.
 
 ## Open
 
+### 2026-10-13 review follow-ups
+
+Source review found these additional issues; they are **not fixed or live-verified** by
+this pass:
+
+- **Public lyrics cancellation:** `PublicLyricsProvider.lyricsImpl` awaits a shared
+  unstructured lookup task without propagating subscriber cancellation. A canceled
+  overlay request can leave old-track web/LRCLIB/AX work running. Preserve shared
+  lookup semantics when introducing cancellation ownership; add a suspended-provider
+  regression before changing it.
+- **Prepared Apple Translation sessions:** the feature-gated preparation paths in
+  `SettingsView` and `LyricsOverlayView` apply runtime states after suspension without
+  request ownership. An old completion/error can overwrite a newer request's state;
+  successful results also omit a current `showsTranslation` guard. Consolidate ownership
+  while preserving the prepared session's behavior, then verify the enabled build lane.
+- **Nested TTML spans:** `TTMLParser.Delegate` has one span text/timing accumulator;
+  opening a nested span replaces its parent's accumulated text and timing. Add nested
+  synthetic fixtures and explicit nesting semantics before replacing that accumulator.
+- **Playback watchdog reconciliation:** the live tick resync handles position drift
+  but ignores paused/disconnected/different-track snapshots unless its seek branch
+  applies state. With a missed notification, the old playing clock can keep advancing.
+  Add a silent-event-stream bridge fixture before reconciling authoritative snapshots.
+- **First rejected disk store:** `DiskBackedMediaCache.store` can persist an empty index
+  when rejecting an oversized first payload, before `ensureInitialized` reads the
+  existing index. Initialize before any disk mutation and test two cache instances
+  sharing an isolated directory.
+- **Disk promotion expiration:** a disk hit promotes its payload through the normal
+  memory store, restarting a full TTL instead of retaining its original expiration.
+  Test a disk hit just before expiry with the injected clock, then carry the remaining
+  lifetime into the memory entry.
+- **Release playback-driver timing:** `release_self.sh` starts its background driver
+  inside command substitution without redirecting the background block's stdout. The
+  capture can wait for the driver's sleeps/actions before sampling starts. The later
+  `/bin/wait` is also invalid. Start the driver in the parent shell, capture `$!`, and
+  use builtin `wait`; verify scheduling with a harmless fake driver before live use.
+
+
 ### Network read timeout during provider work
 
 - Status: open
@@ -42,6 +79,39 @@ the status as fixes land or evidence changes.
   network failure, or a user-visible provider miss.
 
 ## Resolved
+
+### 2026-10-13 delegated correctness and simplification pass
+
+- Routing: one lead integrated the working tree and owned verification. Three
+  GPT-6.1 Sol agents at xhigh reviewed provider/cache handling, playback/parsers,
+  and UI/scripts. Implementation scopes were disjoint; no parallel builds,
+  tests, profiling, app launches, or Music.app commands were delegated.
+- Provider tasks now retain request ownership during cancellation/replacement;
+  old completions cannot clear the replacement task. Translation checks current
+  context after cache/provider suspension, and showing reused lyrics retries a
+  translation canceled while hidden.
+- Playback priming and commands now reject results from stopped/replaced live
+  sessions, including old command cleanup. A resumed paused track no longer
+  counts paused wall time as elapsed playback when the authoritative lookup fails.
+- `build_and_run.sh` validates modes before stopping/building and rejects false
+  or missing `LSUIElement` during verification.
+- Simplification: one snapshot constructor replaces four repeated constructors;
+  the app controller directly owns its lazy provider instead of an extra holder
+  class; removed unused artwork/event-stream wrappers and duplicate panel root,
+  resize, container, and row-identity work.
+- Verification: `./script/agent_verify.sh` passed all **168 tests**, the unexpected
+  compiler-warning gate, app build/launch with `LSUIElement=true`, and profile
+  report/disk checks. Result:
+  `.codex/DerivedData/Logs/Test/Test-MusicFloat-2026.10.13_14-01-19-+0200.xcresult`.
+  Eight new tests cover controlled suspension/cancellation and playback fallback;
+  initial actor-isolation and test-capture diagnostics were fixed before this pass.
+- Isolated script command mocks pass for help, invalid mode, and true/false/missing
+  `LSUIElement`. App Swift source shrank by **35 lines net**; script safeguards added
+  17 lines, regression tests added 303 net. The full gate restarted MusicFloat;
+  no Music.app playback commands or profiling runs were performed. These are
+  correctness and structural findings, not measured CPU/RSS improvements or live
+  Music.app acceptance.
+
 
 ### 2026-10-13 Xcode JSON project format migration
 

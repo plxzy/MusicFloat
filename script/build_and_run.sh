@@ -21,6 +21,19 @@ usage() {
   echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--memory] [-- app args]" >&2
 }
 
+case "$MODE" in
+  run|--debug|debug|--logs|logs|--telemetry|telemetry|--verify|verify|--memory|memory)
+    ;;
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
+
 stop_app() {
   /usr/bin/pkill -x "$APP_NAME" >/dev/null 2>&1 || true
   /usr/bin/killall "$APP_NAME" >/dev/null 2>&1 || true
@@ -108,18 +121,22 @@ case "$MODE" in
     /usr/bin/log stream --info --style compact --predicate "subsystem == \"$BUNDLE_ID\""
     ;;
   --verify|verify)
+    ls_ui_element="$(/usr/bin/plutil -extract LSUIElement raw "$APP_BUNDLE/Contents/Info.plist")"
+    case "$ls_ui_element" in
+      true|YES|1) ;;
+      *)
+        echo "error: expected LSUIElement=true, got '$ls_ui_element'" >&2
+        exit 1
+        ;;
+    esac
     open_app
     wait_for_pid >/dev/null
-    /usr/bin/plutil -extract LSUIElement raw "$APP_BUNDLE/Contents/Info.plist"
+    printf 'LSUIElement=%s\n' "$ls_ui_element"
     ;;
   --memory|memory)
     open_app
     pid="$(wait_for_pid)"
     /bin/sleep 2
     sample_memory "$pid"
-    ;;
-  *)
-    usage
-    exit 2
     ;;
 esac
