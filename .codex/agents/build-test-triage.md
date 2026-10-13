@@ -61,7 +61,7 @@ Use XcodeBuildMCP or Xcode tools when the task is explicitly about Xcode state:
 
 - failing source and test files,
 - `script/build_and_run.sh`,
-- `MusicFloat.xcodeproj/project.pbxproj`,
+- `MusicFloat.xcodeproj/project.xcproj`,
 - `.codex/agents/performance-profiler.md` only if the failure affects evidence,
 - Build macOS Apps `test-triage` skill guidance when needed.
 

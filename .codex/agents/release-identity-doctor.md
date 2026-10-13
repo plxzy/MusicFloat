@@ -33,7 +33,7 @@ otool -L <app-path>/Contents/MacOS/MusicFloat
 - `script/release_self.sh`
 - `script/version.sh`
 - `docs/VERSIONING.md`
-- `MusicFloat.xcodeproj/project.pbxproj`
+- `MusicFloat.xcodeproj/project.xcproj`
 - `MusicFloat/MusicFloat.entitlements`
 
 ## Non-Interference

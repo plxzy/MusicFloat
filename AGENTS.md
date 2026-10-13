@@ -301,6 +301,8 @@ changes the user's active Music playback.
 ## Build And Runtime Baseline
 
 - Project type: Xcode macOS app.
+- Project configuration: `MusicFloat.xcodeproj/project.xcproj` (Xcode's JSON
+  format; requires Xcode 27 or later). Use `script/version.sh` for version edits.
 - Scheme: `MusicFloat`.
 - Bundle ID: `cv.MusicFloat`.
 - The app is an agent-style UI element app: `LSUIElement = YES`.

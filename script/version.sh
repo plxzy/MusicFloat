@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_FILE="${PROJECT_FILE:-MusicFloat.xcodeproj/project.pbxproj}"
+if [[ -z "${PROJECT_FILE:-}" ]]; then
+  if [[ -f MusicFloat.xcodeproj/project.xcproj ]]; then
+    PROJECT_FILE="MusicFloat.xcodeproj/project.xcproj"
+  else
+    PROJECT_FILE="MusicFloat.xcodeproj/project.pbxproj"
+  fi
+fi
 APP_NAME="${APP_NAME:-MusicFloat}"
 INSTALLED_APP="${INSTALLED_APP:-/Applications/$APP_NAME.app}"
 
@@ -9,6 +15,7 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   script/version.sh show
+  script/version.sh value <MARKETING_VERSION|CURRENT_PROJECT_VERSION>
   script/version.sh bump-build
   script/version.sh set-marketing <semver>
   script/version.sh installed
@@ -23,6 +30,10 @@ EOF
 
 project_value() {
   local key="$1"
+  if [[ "$PROJECT_FILE" == *.xcproj ]]; then
+    /usr/bin/awk -F'"' -v key="$key" '$2 == key { print $4; exit }' "$PROJECT_FILE"
+    return
+  fi
   /usr/bin/awk -F' = ' -v key="$key" '
     index($1, key) {
       gsub(/;| /, "", $2)
@@ -36,6 +47,10 @@ set_project_value() {
   local key="$1"
   local old_value="$2"
   local new_value="$3"
+  if [[ "$PROJECT_FILE" == *.xcproj ]]; then
+    /usr/bin/sed -E -i '' "s/^([[:space:]]*\"$key\":[[:space:]]*)\"[^\"]*\"/\\1\"$new_value\"/" "$PROJECT_FILE"
+    return
+  fi
   /usr/bin/sed -i '' "s/$key = $old_value;/$key = $new_value;/g" "$PROJECT_FILE"
 }
 
@@ -119,6 +134,12 @@ cmd="${1:-}"
 case "$cmd" in
   show)
     show_project
+    ;;
+  value)
+    case "${2:-}" in
+      MARKETING_VERSION|CURRENT_PROJECT_VERSION) project_value "$2" ;;
+      *) usage; exit 2 ;;
+    esac
     ;;
   bump-build)
     current_build="$(project_value CURRENT_PROJECT_VERSION)"

@@ -1,0 +1,18 @@
+[mcp_servers.xcode]
+command = "/usr/bin/xcrun"
+args = ["mcpbridge"]
+cwd = "/Users/dev/Development/MusicFloat"
+startup_timeout_sec = 60
+tool_timeout_sec = 300
+
+[mcp_servers.agents]
+enabled = false
+
+[mcp_servers.chrome-devtools]
+enabled = false
+
+[plugins."app-6a99ceead2c481919fb44845267235c4@openai-curated-remote"]
+enabled = false
+
+[apps.asdk_app_6abc2a9552748191b465859a06e90da3]
+enabled = false

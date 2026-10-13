@@ -3,4 +3,4 @@
 set -euo pipefail
 
 script/version.sh bump-build
-echo "Done. Run: git add MusicFloat.xcodeproj/project.pbxproj && git commit -m 'Bump build version'"
+echo "Done. Run: git add MusicFloat.xcodeproj && git commit -m 'Bump build version'"

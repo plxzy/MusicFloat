@@ -15,10 +15,16 @@ The installed app shows both values:
 So `0.3.0 (3)` means semantic version `0.3.0`, build `3`. It does **not**
 mean version `3.0`.
 
+The project uses Xcode's JSON configuration at
+`MusicFloat.xcodeproj/project.xcproj` and requires Xcode 27 or later. The helper
+reads and updates this format, with a fallback for legacy `.pbxproj` projects.
+
 Use the helper script as the source of truth:
 
 ```sh
 script/version.sh show
+script/version.sh value MARKETING_VERSION
+script/version.sh value CURRENT_PROJECT_VERSION
 script/version.sh installed
 script/version.sh running
 script/release_self.sh --status

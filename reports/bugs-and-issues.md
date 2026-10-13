@@ -43,6 +43,30 @@ the status as fixes land or evidence changes.
 
 ## Resolved
 
+### 2026-10-13 Xcode JSON project format migration
+
+- Converted through Xcode 27.2's File inspector from `project.pbxproj` to
+  `MusicFloat.xcodeproj/project.xcproj`; opening the `.xcodeproj` bundle is unchanged.
+  The JSON configuration requires Xcode 27 or later.
+- Preserved every explicit Debug/Release setting for the project, app, and test
+  targets, plus the existing scheme edits. Evaluated app settings also matched
+  before/after in both configurations.
+- Updated version readers/writers, profiling version metadata, the build-bump
+  wrapper, and current documentation/spec paths. Temporary-copy checks passed
+  for version reads, build bumps, marketing updates, and tag validation in both
+  JSON and legacy formats; the real version remains `0.3.1 (6)`.
+- Verification: Debug app build/launch and `LSUIElement` verification passed;
+  Release build passed; profile report/disk and shell syntax checks passed.
+  All 160 tests passed with a temporary xcconfig aligning the test signing team
+  and deployment target to the app. Result:
+  `.codex/DerivedData/Logs/Test/Test-MusicFloat-2026.10.13_13-20-14-+0200.xcresult`.
+- Gate limitations: the unchanged test target references a team with no local
+  signing certificate and targets macOS 26.5 while the app targets 27.0.
+  After temporary overrides, `agent_verify.sh` stopped at its warning gate on
+  `SystemLifecycleObserverTests.swift:48` (`isStopped` mutated after capture by
+  a sendable closure). Signing/deployment settings and test source were preserved;
+  the full strict gate is not a pass.
+
 ### 2026-05-25 stale lyrics shown after no-lyrics track change
 
 - Status: resolved

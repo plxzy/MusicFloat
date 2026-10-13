@@ -39,7 +39,7 @@ otool -L <Release-binary> | rg "Translation|NaturalLanguage|_Translation"
 - `MusicFloat/Settings/SettingsView.swift`
 - `MusicFloat/Runtime/RuntimeAdapterFactory.swift`
 - `MusicFloat/Runtime/ProviderPipelineController.swift`
-- `MusicFloat.xcodeproj/project.pbxproj`
+- `MusicFloat.xcodeproj/project.xcproj`
 - `reports/translation-architecture-plan.md`
 - `reports/performance-flaws.md`
 

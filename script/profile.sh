@@ -301,11 +301,11 @@ git_value() {
 }
 
 app_marketing_version() {
-  /usr/bin/awk -F' = ' '/MARKETING_VERSION = / { gsub(/;| /, "", $2); print $2; exit }' "$PROJECT/project.pbxproj"
+  script/version.sh value MARKETING_VERSION
 }
 
 app_build_version() {
-  /usr/bin/awk -F' = ' '/CURRENT_PROJECT_VERSION = / { gsub(/;| /, "", $2); print $2; exit }' "$PROJECT/project.pbxproj"
+  script/version.sh value CURRENT_PROJECT_VERSION
 }
 
 current_pr_number() {

@@ -33,7 +33,7 @@ plutil -p <app-path>/Contents/Info.plist
 - `MusicFloat/Lyrics/AppleMusicCatalogResolver.swift`
 - `MusicFloat/Runtime/ProviderPipelineController.swift`
 - `MusicFloat/MusicFloat.entitlements`
-- `MusicFloat.xcodeproj/project.pbxproj`
+- `MusicFloat.xcodeproj/project.xcproj`
 - `AGENTS.md`
 
 ## Non-Interference
