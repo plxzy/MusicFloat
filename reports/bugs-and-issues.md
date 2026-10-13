@@ -6,43 +6,6 @@ the status as fixes land or evidence changes.
 
 ## Open
 
-### 2026-10-13 review follow-ups
-
-Source review found these additional issues; they are **not fixed or live-verified** by
-this pass:
-
-- **Public lyrics cancellation:** `PublicLyricsProvider.lyricsImpl` awaits a shared
-  unstructured lookup task without propagating subscriber cancellation. A canceled
-  overlay request can leave old-track web/LRCLIB/AX work running. Preserve shared
-  lookup semantics when introducing cancellation ownership; add a suspended-provider
-  regression before changing it.
-- **Prepared Apple Translation sessions:** the feature-gated preparation paths in
-  `SettingsView` and `LyricsOverlayView` apply runtime states after suspension without
-  request ownership. An old completion/error can overwrite a newer request's state;
-  successful results also omit a current `showsTranslation` guard. Consolidate ownership
-  while preserving the prepared session's behavior, then verify the enabled build lane.
-- **Nested TTML spans:** `TTMLParser.Delegate` has one span text/timing accumulator;
-  opening a nested span replaces its parent's accumulated text and timing. Add nested
-  synthetic fixtures and explicit nesting semantics before replacing that accumulator.
-- **Playback watchdog reconciliation:** the live tick resync handles position drift
-  but ignores paused/disconnected/different-track snapshots unless its seek branch
-  applies state. With a missed notification, the old playing clock can keep advancing.
-  Add a silent-event-stream bridge fixture before reconciling authoritative snapshots.
-- **First rejected disk store:** `DiskBackedMediaCache.store` can persist an empty index
-  when rejecting an oversized first payload, before `ensureInitialized` reads the
-  existing index. Initialize before any disk mutation and test two cache instances
-  sharing an isolated directory.
-- **Disk promotion expiration:** a disk hit promotes its payload through the normal
-  memory store, restarting a full TTL instead of retaining its original expiration.
-  Test a disk hit just before expiry with the injected clock, then carry the remaining
-  lifetime into the memory entry.
-- **Release playback-driver timing:** `release_self.sh` starts its background driver
-  inside command substitution without redirecting the background block's stdout. The
-  capture can wait for the driver's sleeps/actions before sampling starts. The later
-  `/bin/wait` is also invalid. Start the driver in the parent shell, capture `$!`, and
-  use builtin `wait`; verify scheduling with a harmless fake driver before live use.
-
-
 ### Network read timeout during provider work
 
 - Status: open
@@ -79,6 +42,57 @@ this pass:
   network failure, or a user-visible provider miss.
 
 ## Resolved
+
+### 2026-10-13 follow-up correctness, overlay placement, and playback recovery
+
+- Shared public lyrics lookups now track subscribers: cancellation resumes the
+  canceled caller promptly, and the final subscriber cancels the underlying work.
+  Lookup identity guards reject abandoned results and protect replacement requests.
+- Prepared Apple Translation requests share ownership/context validation across
+  settings and overlay, preserving direct prepared-session translation while
+  rejecting stale results, errors, and cancellation. Both feature build lanes compile;
+  actual language download/session UI acceptance remains outstanding.
+- Nested TTML preserves parent text and styling spans, with explicit child timing
+  taking precedence over overlapping parent timing. Synthetic fixtures cover these
+  semantics without inventing timing for untimed text.
+- Disk cache initializes its existing index before rejecting an oversized first
+  store, and memory promotion retains the original expiration deadline.
+- Release sampling starts its playback driver in the parent shell and cancels/waits
+  for its own child on normal or failed exit. Harmless scheduling/cleanup probes pass.
+- Live watchdog applies missed track/status changes and retains playback through
+  ambiguous nil snapshots while Music.app remains running. Confirmed process exit
+  clears playback; a running-but-stopped Music process remains ambiguous on nil reads.
+- User reported Music playing while the overlay showed **Waiting for playback**.
+  Source review found startup event subscription after two suspensions and no
+  watchdog when initially waiting/paused. Events now subscribe before priming;
+  visible waiting/paused states retry every three seconds with failure backoff,
+  and only playing states advance elapsed time. Hiding cancels this work. Failed
+  reveal snapshots preserve known playback. Initial state publishes before volume.
+  The exact original live trigger was not captured; recovery paths are regression
+  tested, and a fresh live launch visibly showed a track and Pause control.
+- Overlay adds persisted **Lock Overlay Position** and optional **Snap Overlay to
+  Screen Edges**, both off by default. Placement stores monitor identity and normalized
+  position, keeps legacy-origin fallback, clamps into visible bounds, and preserves
+  a disconnected monitor's location until deliberate user movement. Serial-less
+  monitor identity is best effort. Snapping uses 12-point padding and an 18-point
+  threshold after dragging ends. Lock preserves playback interaction; click-through
+  is deferred. Geometry is tested; physical multi-monitor acceptance is outstanding.
+- Verification: `./script/agent_verify.sh` passed **199 unique tests**, zero unexpected
+  compiler warnings, app build/launch with `LSUIElement=true`, and profile report/disk
+  checks. Result: `.codex/DerivedData/Logs/Test/Test-MusicFloat-2026.10.13_14-36-22-+0200.xcresult`.
+  Routing remained one lead plus three GPT-6.1 Sol/xhigh sidecars with disjoint source
+  scopes; only the lead ran builds, tests, app launches, and live profiling.
+- Clean Release live sample `20261013-123954Z-live-Direct-Sample-de7c419` passed playback,
+  overlay, provider, seek, and track-change verification using timed LRCLIB lyrics.
+  The native live overlay also exposed the active track, Pause, scrub, and volume
+  controls. Lock/snapping interaction and real monitor reconnect acceptance remain
+  unverified; native automation did not expose the status-item menu reliably.
+- Direct sample logging now works without admin unified-log access by selecting
+  app stderr as a labeled fallback. Shell syntax, isolated source-selection/counter
+  probes, and strict mixed-capture comparison rejection pass. Network log coverage
+  is limited in this mode; zero captured timeouts does not close the open issue.
+- These are correctness fixes and features, not measured CPU/RSS improvements.
+
 
 ### 2026-10-13 delegated correctness and simplification pass
 

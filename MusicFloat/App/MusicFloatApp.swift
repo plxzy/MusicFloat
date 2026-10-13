@@ -75,6 +75,15 @@ private final class MusicFloatAppController {
             appState: appState,
             commands: MenuBarStatusItemCommands(
                 toggleOverlay: { [weak self] in self?.toggleOverlay() },
+                toggleOverlayLock: { [weak self] in
+                    guard let self else { return }
+                    appState.setOverlayLocked(!appState.isOverlayLocked)
+                    panelController.updateInteraction(appState: appState)
+                },
+                toggleEdgeSnapping: { [weak self] in
+                    guard let self else { return }
+                    appState.setSnapsOverlayToEdges(!appState.snapsOverlayToEdges)
+                },
                 toggleMockPreview: { [weak self] in self?.toggleMockPreview() },
                 toggleLiveAppleMusic: { [weak self] in self?.toggleLiveAppleMusic() },
                 nudgeLyricOffset: { [weak self] delta in self?.nudgeLyricOffset(by: delta) },

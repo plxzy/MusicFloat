@@ -187,6 +187,48 @@ final class MediaCacheTests: XCTestCase {
         XCTAssertNil(restored)
     }
 
+    func testFirstRejectedDiskStorePreservesExistingIndexAndRemovesRejectedReplacement() async throws {
+        let rootURL = try makeTemporaryCacheDirectory()
+        let diskPolicy = DiskMediaCachePolicy(maxEntries: 8, maxTotalCost: 1024, maxObjectCost: 64)
+        let retainedKey = MediaCacheKey(namespace: .translation, rawValue: "retained")
+        let replacedKey = MediaCacheKey(namespace: .translation, rawValue: "rejected-replacement")
+        let writer = DiskBackedMediaCache(diskPolicy: diskPolicy, diskPersistenceEnabled: true, rootURL: rootURL)
+        await writer.store(.text("keep"), for: retainedKey)
+        await writer.store(.text("old"), for: replacedKey)
+
+        let replacer = DiskBackedMediaCache(diskPolicy: diskPolicy, diskPersistenceEnabled: true, rootURL: rootURL)
+        await replacer.store(.text(String(repeating: "x", count: 65)), for: replacedKey)
+
+        let reader = DiskBackedMediaCache(diskPolicy: diskPolicy, diskPersistenceEnabled: true, rootURL: rootURL)
+        let retained = await reader.value(for: retainedKey)
+        let replaced = await reader.value(for: replacedKey)
+        let usage = await reader.usageSummary()
+        XCTAssertEqual(retained, .text("keep"))
+        XCTAssertNil(replaced)
+        XCTAssertEqual(usage.diskEntryCount, 1)
+    }
+
+    func testDiskPromotionKeepsOriginalExpiration() async throws {
+        let rootURL = try makeTemporaryCacheDirectory()
+        let clock = TestClock()
+        let policy = MediaCachePolicy(translationTTL: 10)
+        let key = MediaCacheKey(namespace: .translation, rawValue: "expires")
+        let writer = DiskBackedMediaCache(
+            memoryPolicy: policy, diskPersistenceEnabled: true, rootURL: rootURL, now: { clock.now }
+        )
+        await writer.store(.text("translation"), for: key)
+        clock.advance(by: 9)
+
+        let reader = DiskBackedMediaCache(
+            memoryPolicy: policy, diskPersistenceEnabled: true, rootURL: rootURL, now: { clock.now }
+        )
+        let promoted = await reader.value(for: key)
+        XCTAssertEqual(promoted, .text("translation"))
+        clock.advance(by: 2)
+        let expired = await reader.value(for: key)
+        XCTAssertNil(expired)
+    }
+
     private func makeTemporaryCacheDirectory() throws -> URL {
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("MusicFloatMediaCacheTests-\(UUID().uuidString)", isDirectory: true)

@@ -662,6 +662,32 @@ start_live_log_capture() {
   echo "$!"
 }
 
+finalize_sample_log_capture() {
+  local log_path="$1"
+  local stream_path="$2"
+  local stderr_path="$3"
+  local stream_pid="$4"
+  local source="app_stderr"
+  local network_coverage="limited"
+
+  if [[ -n "$stream_pid" ]] && /bin/kill -0 "$stream_pid" 2>/dev/null \
+    && ! /usr/bin/grep -E '^log:|Must be admin' "$stream_path" >/dev/null; then
+    source="unified_stream"
+    network_coverage="unified_stream"
+  fi
+  stop_live_log_capture "$stream_pid"
+
+  # Select one source instead of concatenating duplicate application events.
+  # Preserve both raw artifacts, including a failed stream's diagnostics.
+  if [[ "$source" == "unified_stream" ]]; then
+    /bin/cat "$stream_path" > "$log_path"
+  else
+    /bin/cat "$stderr_path" > "$log_path"
+    echo "  Unified log stream unavailable; using application stderr. Process-wide network log coverage is limited." >&2
+  fi
+  printf '\nMusicFloat log capture source=%s process_network_logs=%s\n' "$source" "$network_coverage" >> "$log_path"
+}
+
 start_usage_capture() {
   local usage_path="$1"
   /bin/mkdir -p "$(dirname "$usage_path")"
@@ -872,7 +898,10 @@ def live_verification_summary(path):
     if not p.is_file():
         return None
     text = p.read_text(errors="replace")
+    capture = re.search(r"MusicFloat log capture source=(\w+) process_network_logs=(\w+)", text)
     summary = {
+        "log_capture_source": capture.group(1) if capture else "legacy_unified_stream",
+        "process_network_log_coverage": capture.group(2) if capture else "unknown",
         "live_launch": bool(re.search(r"Live mode requested", text)),
         "bridge_started": bool(re.search(r"Live Apple Music bridge started", text)),
         "playing_prime": bool(re.search(r"Live prime: status=playing hasTrack=true", text)),
@@ -953,6 +982,9 @@ def live_verification_summary(path):
     summary["translation_cache_hits"] = len(re.findall(r"Translation cache hit", text))
     return summary
 
+app_stderr_path = env("RUN_LIVE_LOG_PATH") + ".app-stderr.log" if env("RUN_LIVE_LOG_PATH") else ""
+app_stderr_capture_enabled = env("RUN_KIND") == "sample" and bool(app_stderr_path) and Path(app_stderr_path).is_file()
+
 record = {
     "schema": 1,
     "run_id": env("RUN_ID"),
@@ -978,6 +1010,7 @@ record = {
         "marketing_version": env("RUN_MARKETING_VERSION") or None,
         "build_version": env("RUN_BUILD_VERSION") or None,
         "apple_translation_build": env("RUN_APPLE_TRANSLATION_BUILD") == "true",
+        "app_stderr_capture_enabled": app_stderr_capture_enabled,
         "hide_after_seconds": float(env("RUN_HIDE_AFTER_SECONDS")) if env("RUN_HIDE_AFTER_SECONDS") else None,
     },
     "usage": usage,
@@ -986,6 +1019,9 @@ record = {
         "trace_size_mb": trace_size_mb,
         "usage_csv": artifact_path(usage_path),
         "live_log": artifact_path(env("RUN_LIVE_LOG_PATH")),
+        "app_stderr_log": artifact_path(app_stderr_path) if app_stderr_capture_enabled else None,
+        "unified_stream_log": artifact_path(env("RUN_LIVE_LOG_PATH") + ".unified-stream.log")
+            if env("RUN_LIVE_LOG_PATH") and Path(env("RUN_LIVE_LOG_PATH") + ".unified-stream.log").is_file() else None,
     },
     "live_verification": live_verification_summary(env("RUN_LIVE_LOG_PATH")),
 }
@@ -1284,12 +1320,14 @@ do_sample() {
 
   local seconds
   seconds="$(duration_to_sleep_seconds "$duration")"
-  local timestamp safe_name usage_log_path live_log_path driver_log_path ledger_live_log_path live_log_pid usage_log_pid driver_pid
+  local timestamp safe_name usage_log_path live_log_path driver_log_path ledger_live_log_path live_log_pid usage_log_pid driver_pid app_stderr_path stream_log_path
   timestamp="$(/bin/date -u +%Y%m%d-%H%M%SZ)"
   safe_name="Direct-Sample"
   local run_id="${timestamp}-$(mode_name "$use_demo" "$use_live")-${safe_name}-$(git_value rev-parse --short HEAD)"
   usage_log_path="$USAGE_LOG_DIR/${APP_NAME}-${safe_name}-$timestamp.usage.csv"
   live_log_path="$LIVE_LOG_DIR/${APP_NAME}-${safe_name}-$timestamp.live.log"
+  app_stderr_path="$live_log_path.app-stderr.log"
+  stream_log_path="$live_log_path.unified-stream.log"
   driver_log_path="$LIVE_LOG_DIR/${APP_NAME}-${safe_name}-$timestamp.music-driver.log"
   ledger_live_log_path=""
   live_log_pid=""
@@ -1309,12 +1347,18 @@ do_sample() {
 
   if [[ "$use_live" == "true" || -n "$hide_after_seconds" ]]; then
     ledger_live_log_path="$live_log_path"
-    live_log_pid="$(start_live_log_capture "$live_log_path")"
+    live_log_pid="$(start_live_log_capture "$stream_log_path")"
     /bin/sleep 0.5
   fi
 
   echo "  Direct sample: ${duration} | Demo: $use_demo | Live: $use_live | Drive Music: $drive_music | Hide after: ${hide_after_seconds:-none} | Apple Translation build: $(apple_translation_build_enabled && printf true || printf false)"
-  "${launch_args[@]}" >/dev/null 2>&1 &
+  if [[ -n "$ledger_live_log_path" ]]; then
+    # Application stderr can carry Logger events without admin log-stream access.
+    # This is a separate artifact so available unified logs are never counted twice.
+    OS_ACTIVITY_DT_MODE=YES "${launch_args[@]}" > "$app_stderr_path" 2>&1 &
+  else
+    "${launch_args[@]}" >/dev/null 2>&1 &
+  fi
   usage_log_pid="$(start_usage_capture "$usage_log_path")"
   if [[ "$use_live" == "true" && "$drive_music" == "true" ]]; then
     driver_pid="$(start_music_driver "$driver_log_path")"
@@ -1323,7 +1367,9 @@ do_sample() {
   stop_app
   stop_music_driver "$driver_pid"
   stop_usage_capture "$usage_log_pid"
-  stop_live_log_capture "$live_log_pid"
+  if [[ -n "$ledger_live_log_path" ]]; then
+    finalize_sample_log_capture "$live_log_path" "$stream_log_path" "$app_stderr_path" "$live_log_pid"
+  fi
 
   if [[ "$use_live" == "true" ]]; then
     if ! verify_live_log "$live_log_path" "$drive_music"; then
@@ -1494,6 +1540,8 @@ if a.get("scenario") != b.get("scenario"):
     problems.append("scenario differs")
 if a.get("app", {}).get("apple_translation_build", False) != b.get("app", {}).get("apple_translation_build", False):
     problems.append("Apple Translation build setting differs")
+if a.get("app", {}).get("app_stderr_capture_enabled", False) != b.get("app", {}).get("app_stderr_capture_enabled", False):
+    problems.append("application stderr capture (OS_ACTIVITY_DT_MODE=YES) differs")
 if not a.get("valid") or not b.get("valid"):
     problems.append("at least one run is invalid")
 if a.get("git", {}).get("tracked_dirty") or b.get("git", {}).get("tracked_dirty"):

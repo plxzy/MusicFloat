@@ -37,6 +37,7 @@ show_status=false
 memory_duration=2
 launch_args=()
 drive_music=false
+driver_pid=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -211,9 +212,26 @@ sample_process_memory() {
     }'
 }
 
+stop_music_driver() {
+  if [[ -n "$driver_pid" ]]; then
+    kill "$driver_pid" 2>/dev/null || true
+    wait "$driver_pid" 2>/dev/null || true
+    driver_pid=""
+  fi
+}
+
 drive_music_during_sample() {
   (
-    /bin/sleep 5
+    child_pid=""
+    trap 'if [[ -n "$child_pid" ]]; then kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; fi' EXIT
+    trap 'exit 0' TERM INT
+    pause_driver() {
+      /bin/sleep "$1" &
+      child_pid=$!
+      wait "$child_pid"
+      child_pid=""
+    }
+    pause_driver 5
     /usr/bin/osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
 tell application id "com.apple.Music"
   if it is running then
@@ -224,7 +242,7 @@ tell application id "com.apple.Music"
 end tell
 APPLESCRIPT
 
-    /bin/sleep 8
+    pause_driver 8
     /usr/bin/osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
 tell application id "com.apple.Music"
   if it is running then
@@ -234,8 +252,9 @@ tell application id "com.apple.Music"
   end if
 end tell
 APPLESCRIPT
-  ) &
-  echo "$!"
+  ) >/dev/null 2>&1 &
+  driver_pid=$!
+  trap stop_music_driver EXIT
 }
 
 if [[ "$show_status" == true && "$install_app" == false && "$open_app" == false && "$sample_memory" == false ]]; then
@@ -312,16 +331,11 @@ if [[ "$open_app" == true ]]; then
     /bin/sleep 2
     driver_pid=""
     if [[ "$drive_music" == true ]]; then
-      driver_pid="$(drive_music_during_sample)"
+      drive_music_during_sample
       echo "music_driver_pid=$driver_pid"
     fi
     sample_process_memory "$pid" "$memory_duration"
-    if [[ -n "$driver_pid" ]]; then
-      if /bin/kill -0 "$driver_pid" >/dev/null 2>&1; then
-        /bin/kill "$driver_pid" >/dev/null 2>&1 || true
-      fi
-      /bin/wait "$driver_pid" 2>/dev/null || true
-    fi
+    stop_music_driver
   fi
 fi
 

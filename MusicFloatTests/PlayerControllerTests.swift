@@ -256,6 +256,168 @@ final class PlayerControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testVisibleWatchdogRecoversFailedPrimeAndMissedResume() async throws {
+        let playing = MockMusicAppBridge.previewState
+        var paused = playing
+        paused.playbackStatus = .paused
+        for initial in [PlayerState.disconnected, paused] {
+            let appState = AppState(userDefaults: UserDefaults(suiteName: "MusicFloatTests.recoverPrime.\(UUID().uuidString)")!)
+            appState.isOverlayVisible = true
+            let bridge = RecordingMusicBridge(states: [initial, playing])
+            let controller = PlayerController(
+                bridge: MockMusicAppBridge(), liveBridgeFactory: { bridge }, musicAppIsRunning: { true }
+            )
+            defer { controller.stopLiveAppleMusic(appState: appState) }
+            var changedTrackIDs: [String?] = []
+            controller.startLiveAppleMusic(appState: appState) { changedTrackIDs.append($0?.id) }
+            try await waitUntil { bridge.currentStateCallCount == 1 }
+            try await Task.sleep(for: .milliseconds(100))
+            XCTAssertEqual(appState.effectiveElapsedTime, initial.elapsedTime, accuracy: 0.001)
+            try await waitUntil(timeout: 5) { appState.playerState.playbackStatus == .playing }
+            XCTAssertEqual(appState.playerState.track?.id, playing.track?.id)
+            XCTAssertEqual(changedTrackIDs, initial.track == nil ? [nil, playing.track?.id] : [playing.track?.id])
+        }
+    }
+
+    @MainActor
+    func testStartupSubscribesBeforeSnapshotAndBuffersEvent() async throws {
+        let appState = AppState(userDefaults: UserDefaults(suiteName: "MusicFloatTests.primeEvent.\(UUID().uuidString)")!)
+        let bridge = RecordingMusicBridge(states: [])
+        let (stream, continuation) = AsyncStream<PlayerState>.makeStream()
+        bridge.eventStream = stream
+        bridge.stateHandler = {
+            XCTAssertEqual(bridge.eventsCallCount, 1)
+            continuation.yield(MockMusicAppBridge.previewState)
+            return .disconnected
+        }
+        let controller = PlayerController(bridge: MockMusicAppBridge(), liveBridgeFactory: { bridge })
+        defer { controller.stopLiveAppleMusic(appState: appState); continuation.finish() }
+        controller.startLiveAppleMusic(appState: appState)
+        try await waitUntil { appState.playerState.track != nil }
+        XCTAssertEqual(appState.playerState.playbackStatus, .playing)
+    }
+
+    @MainActor
+    func testHiddenOverlayCancelsWaitingPlaybackRecovery() async throws {
+        let appState = AppState(userDefaults: UserDefaults(suiteName: "MusicFloatTests.hiddenRecovery.\(UUID().uuidString)")!)
+        appState.isOverlayVisible = true
+        let bridge = RecordingMusicBridge(states: [.disconnected, MockMusicAppBridge.previewState])
+        let controller = PlayerController(
+            bridge: MockMusicAppBridge(), liveBridgeFactory: { bridge }, musicAppIsRunning: { true }
+        )
+        defer { controller.stopLiveAppleMusic(appState: appState) }
+        controller.startLiveAppleMusic(appState: appState)
+        try await waitUntil { bridge.eventsCallCount == 1 && appState.playerState == .disconnected }
+        appState.isOverlayVisible = false
+        controller.overlayVisibilityChanged(false, appState: appState)
+        try await Task.sleep(for: .milliseconds(3_200))
+        XCTAssertEqual(bridge.currentStateCallCount, 1)
+        XCTAssertNil(appState.playerState.track)
+    }
+
+    @MainActor
+    func testFailedRevealSnapshotPreservesKnownPlayback() async throws {
+        let appState = AppState(userDefaults: UserDefaults(suiteName: "MusicFloatTests.failedReveal.\(UUID().uuidString)")!)
+        let initial = MockMusicAppBridge.previewState
+        let bridge = RecordingMusicBridge(states: [initial, .disconnected])
+        let controller = PlayerController(
+            bridge: MockMusicAppBridge(), liveBridgeFactory: { bridge }, musicAppIsRunning: { true }
+        )
+        defer { controller.stopLiveAppleMusic(appState: appState) }
+        controller.startLiveAppleMusic(appState: appState)
+        try await waitUntil { appState.playerState.track != nil }
+        appState.isOverlayVisible = true
+        controller.overlayVisibilityChanged(true, appState: appState)
+        try await waitUntil { bridge.currentStateCallCount >= 2 }
+        XCTAssertEqual(appState.playerState, initial)
+    }
+
+    @MainActor
+    func testWatchdogRecoversMissedPauseAndConfirmedProcessExit() async throws {
+        let initial = MockMusicAppBridge.previewState
+        let paused = PlayerState(playbackStatus: .paused, track: initial.track, elapsedTime: initial.elapsedTime, updatedAt: Date())
+        for snapshot in [paused, .disconnected] {
+            let defaults = UserDefaults(suiteName: "MusicFloatTests.watchdogReconcile.\(UUID().uuidString)")!
+            let appState = AppState(userDefaults: defaults)
+            appState.isOverlayVisible = true
+            let bridge = RecordingMusicBridge(states: [initial, snapshot])
+            let controller = PlayerController(
+                bridge: MockMusicAppBridge(), liveBridgeFactory: { bridge },
+                musicAppIsRunning: { snapshot.track != nil }
+            )
+            var changedTrackIDs: [String?] = []
+            controller.startLiveAppleMusic(appState: appState) { track in
+                changedTrackIDs.append(track?.id)
+                appState.applyLyricsDocument(Self.watchdogBoundaryDocument(at: initial.elapsedTime))
+            }
+            try await waitUntil { appState.playerState == snapshot }
+
+            XCTAssertEqual(appState.effectiveElapsedTime, snapshot.elapsedTime, accuracy: 0.001)
+            XCTAssertEqual(changedTrackIDs, snapshot.track == nil ? [initial.track?.id, nil] : [initial.track?.id])
+            controller.stopLiveAppleMusic(appState: appState)
+        }
+    }
+
+    @MainActor
+    func testWatchdogKeepsPlaybackOnAmbiguousMissingSnapshot() async throws {
+        let defaults = UserDefaults(suiteName: "MusicFloatTests.watchdogMissingSnapshot.\(UUID().uuidString)")!
+        let appState = AppState(userDefaults: defaults)
+        appState.isOverlayVisible = true
+        let initial = MockMusicAppBridge.previewState
+        let bridge = RecordingMusicBridge(states: [initial, .disconnected])
+        let controller = PlayerController(
+            bridge: MockMusicAppBridge(), liveBridgeFactory: { bridge }, musicAppIsRunning: { true }
+        )
+        defer { controller.stopLiveAppleMusic(appState: appState) }
+        var trackChangeCount = 0
+        controller.startLiveAppleMusic(appState: appState) { _ in
+            trackChangeCount += 1
+            appState.applyLyricsDocument(Self.watchdogBoundaryDocument(at: initial.elapsedTime))
+        }
+        try await waitUntil { bridge.currentStateCallCount >= 2 && appState.effectiveElapsedTime > initial.elapsedTime }
+
+        XCTAssertEqual(appState.playerState, initial)
+        XCTAssertEqual(trackChangeCount, 1)
+    }
+
+    @MainActor
+    func testWatchdogRecoversNewTrackWithoutRepeatingCallbackForLateEvent() async throws {
+        let defaults = UserDefaults(suiteName: "MusicFloatTests.watchdogNewTrack.\(UUID().uuidString)")!
+        let appState = AppState(userDefaults: defaults)
+        appState.isOverlayVisible = true
+        let initial = MockMusicAppBridge.previewState
+        let track = NowPlayingTrack(id: "watchdog-next", title: "Next", artist: "", album: "", duration: 90, providerName: "Test")
+        let next = PlayerState(playbackStatus: .playing, track: track, elapsedTime: 0, updatedAt: Date())
+        let bridge = RecordingMusicBridge(states: [initial, next])
+        let (stream, continuation) = AsyncStream<PlayerState>.makeStream()
+        bridge.eventStream = stream
+        let controller = PlayerController(
+            bridge: MockMusicAppBridge(), liveBridgeFactory: { bridge }, musicAppIsRunning: { true }
+        )
+        defer { controller.stopLiveAppleMusic(appState: appState); continuation.finish() }
+        var changedTrackIDs: [String?] = []
+        controller.startLiveAppleMusic(appState: appState) { track in
+            changedTrackIDs.append(track?.id)
+            if changedTrackIDs.count == 1 {
+                appState.applyLyricsDocument(Self.watchdogBoundaryDocument(at: initial.elapsedTime))
+            }
+        }
+        try await waitUntil { appState.playerState.track?.id == track.id }
+        XCTAssertEqual(appState.effectiveElapsedTime, 0, accuracy: 0.1)
+
+        var lateEvent = next
+        lateEvent.playbackStatus = .paused
+        continuation.yield(lateEvent)
+        try await waitUntil { appState.playerState.playbackStatus == .paused }
+
+        XCTAssertEqual(changedTrackIDs, [initial.track?.id, track.id])
+    }
+
+    private static func watchdogBoundaryDocument(at elapsed: TimeInterval) -> LyricsDocument {
+        LyricsDocument(source: .mock, lines: [LyricLine(id: 0, text: "Boundary", startTime: elapsed + 0.03)], isTimed: true)
+    }
+
+    @MainActor
     func testVolumeCommandClampsBeforeBridge() async {
         let defaults = UserDefaults(suiteName: "MusicFloatTests.volumeClamp.\(UUID().uuidString)")!
         let appState = AppState(userDefaults: defaults)
@@ -563,11 +725,12 @@ final class PlayerControllerTests: XCTestCase {
     }
 
     private func waitUntil(
+        timeout: TimeInterval = 1,
         _ predicate: @MainActor @escaping () -> Bool,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
-        for _ in 0..<50 {
+        for _ in 0..<Int(timeout / 0.02) {
             if await predicate() {
                 return
             }
@@ -586,7 +749,9 @@ private final class RecordingMusicBridge: MusicAppBridge {
     var reportedVolume: Int?
     var stateHandler: (@MainActor () async -> PlayerState)?
     var commandHandler: (@MainActor () async -> MusicPlaybackCommandResult)?
+    var eventStream: AsyncStream<PlayerState>?
     private(set) var currentStateCallCount = 0
+    private(set) var eventsCallCount = 0
 
     init(states: [PlayerState]) {
         self.states = states
@@ -609,5 +774,10 @@ private final class RecordingMusicBridge: MusicAppBridge {
 
     func currentVolume() async -> Int? {
         reportedVolume
+    }
+
+    func events() -> AsyncStream<PlayerState> {
+        eventsCallCount += 1
+        return eventStream ?? AsyncStream { $0.finish() }
     }
 }

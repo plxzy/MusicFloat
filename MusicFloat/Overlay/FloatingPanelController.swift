@@ -3,14 +3,18 @@ import OSLog
 import SwiftUI
 
 @MainActor
-final class FloatingPanelController: NSObject {
+final class FloatingPanelController: NSObject, NSWindowDelegate {
     private var panel: NSPanel?
     private let userDefaults: UserDefaults
     private var isObservingScreenChanges = false
+    private var isAdjustingFrame = false
+    private var pendingMove: Task<Void, Never>?
+    private weak var appState: AppState?
 
     private enum DefaultsKey {
         static let originX = "floatingPanelOriginX"
         static let originY = "floatingPanelOriginY"
+        static let placement = "floatingPanelPlacementV2"
     }
 
     init(userDefaults: UserDefaults) {
@@ -28,6 +32,7 @@ final class FloatingPanelController: NSObject {
         playbackCommands: LyricsOverlayPlaybackCommands = .disabled
     ) {
         AppTelemetry.measure("FloatingPanelShow") {
+            self.appState = appState
             let didCreatePanel = panel == nil
             let panel = panel ?? makePanel(
                 appState: appState,
@@ -44,6 +49,7 @@ final class FloatingPanelController: NSObject {
                     in: panel
                 )
             }
+            updateInteraction(appState: appState)
             applySize(appState: appState, to: panel)
 
             AppTelemetry.windowing.info("Show floating panel created=\(didCreatePanel)")
@@ -56,9 +62,9 @@ final class FloatingPanelController: NSObject {
             AppTelemetry.windowing.info(
                 "Hide floating panel hasPanel=\(self.panel != nil) releaseResources=\(releaseResources)"
             )
-            if let panel {
-                persistFrameOrigin(panel.frame)
-            }
+            if let panel { persistPlacement(panel.frame, userInitiated: pendingMove != nil) }
+            pendingMove?.cancel()
+            pendingMove = nil
             panel?.orderOut(nil)
 
             if releaseResources {
@@ -88,9 +94,8 @@ final class FloatingPanelController: NSObject {
             currentFrame: panel.frame,
             size: panelSize
         )
-        panel.setFrame(clamped(frame), display: true)
-        panel.contentView?.frame = NSRect(origin: .zero, size: panel.frame.size)
-        persistFrameOrigin(panel.frame)
+        setFrame(clamped(frame), for: panel)
+        persistPlacement(panel.frame)
     }
 
     private func clamped(_ frame: NSRect) -> NSRect {
@@ -103,8 +108,8 @@ final class FloatingPanelController: NSObject {
 
     private func screen(for frame: NSRect) -> NSScreen? {
         let center = NSPoint(x: frame.midX, y: frame.midY)
-        return NSScreen.screens.first { $0.visibleFrame.contains(center) }
-            ?? NSScreen.screens.first { $0.visibleFrame.intersects(frame) }
+        return NSScreen.screens.first { $0.frame.contains(center) }
+            ?? NSScreen.screens.first { $0.frame.intersects(frame) }
             ?? NSScreen.main
     }
 
@@ -142,7 +147,9 @@ final class FloatingPanelController: NSObject {
 
             panel.level = .floating
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-            panel.isMovableByWindowBackground = true
+            panel.delegate = self
+            panel.isMovableByWindowBackground = !appState.isOverlayLocked
+            panel.isMovable = !appState.isOverlayLocked
             panel.hidesOnDeactivate = false
             panel.isReleasedWhenClosed = false
             panel.backgroundColor = .clear
@@ -182,6 +189,7 @@ final class FloatingPanelController: NSObject {
     }
 
     private func initialFrame(for size: NSSize) -> NSRect {
+        if let frame = restoredFrame(for: size) { return frame }
         if let restoredOrigin = restoredOrigin() {
             return clamped(NSRect(origin: restoredOrigin, size: size))
         }
@@ -209,9 +217,85 @@ final class FloatingPanelController: NSObject {
         )
     }
 
-    private func persistFrameOrigin(_ frame: NSRect) {
-        userDefaults.set(Double(frame.origin.x), forKey: DefaultsKey.originX)
-        userDefaults.set(Double(frame.origin.y), forKey: DefaultsKey.originY)
+    private static func displayIdentifier(_ screen: NSScreen) -> String {
+        let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+        let serial = CGDisplaySerialNumber(displayID)
+        // Some displays do not report a serial. Their system display ID is a
+        // best-effort fallback, rather than treating identical models as one.
+        if serial == 0 && CGDisplayIsBuiltin(displayID) == 0 { return "display-\(displayID)" }
+        return "\(CGDisplayVendorNumber(displayID))-\(CGDisplayModelNumber(displayID))-\(serial)"
+    }
+
+    private var savedPosition: FloatingPanelPlacement.SavedPosition? {
+        userDefaults.data(forKey: DefaultsKey.placement).flatMap {
+            try? JSONDecoder().decode(FloatingPanelPlacement.SavedPosition.self, from: $0)
+        }
+    }
+
+    private func restoredFrame(for size: NSSize) -> NSRect? {
+        guard let placement = savedPosition else { return nil }
+        let displays = NSScreen.screens.map {
+            FloatingPanelPlacement.Display(id: Self.displayIdentifier($0), visibleFrame: $0.visibleFrame)
+        }
+        return FloatingPanelPlacement.restoredFrame(
+            placement, size: size, displays: displays,
+            fallbackDisplayID: (activeScreen() ?? NSScreen.main).map(Self.displayIdentifier)
+        )
+    }
+
+    private func persistPlacement(_ frame: NSRect, userInitiated: Bool = false) {
+        guard let screen = screen(for: frame) else { return }
+        let placement = FloatingPanelPlacement.savedPosition(
+            frame, display: .init(id: Self.displayIdentifier(screen), visibleFrame: screen.visibleFrame),
+            previous: savedPosition, connectedDisplayIDs: NSScreen.screens.map(Self.displayIdentifier),
+            userInitiated: userInitiated
+        )
+        if let data = try? JSONEncoder().encode(placement) {
+            userDefaults.set(data, forKey: DefaultsKey.placement)
+        }
+    }
+
+    func updateInteraction(appState: AppState) {
+        panel?.isMovable = !appState.isOverlayLocked
+        panel?.isMovableByWindowBackground = !appState.isOverlayLocked
+        if appState.isOverlayLocked {
+            if pendingMove != nil, let panel { persistPlacement(panel.frame, userInitiated: true) }
+            pendingMove?.cancel()
+            pendingMove = nil
+        }
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard !isAdjustingFrame, notification.object as? NSPanel === panel else { return }
+        pendingMove?.cancel()
+        pendingMove = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            self?.finishPanelMove()
+        }
+    }
+
+    private func finishPanelMove() {
+        pendingMove = nil
+        guard let panel else { return }
+        // Wait for release so snapping never fights an active cross-screen drag.
+        if NSEvent.pressedMouseButtons & 1 != 0 {
+            windowDidMove(Notification(name: NSWindow.didMoveNotification, object: panel))
+            return
+        }
+        if appState?.snapsOverlayToEdges == true,
+           appState?.isOverlayLocked == false,
+           let visibleFrame = screen(for: panel.frame)?.visibleFrame {
+            setFrame(FloatingPanelPlacement.snapped(panel.frame, to: visibleFrame), for: panel)
+        }
+        persistPlacement(panel.frame, userInitiated: true)
+    }
+
+    private func setFrame(_ frame: NSRect, for panel: NSPanel) {
+        isAdjustingFrame = true
+        defer { isAdjustingFrame = false }
+        panel.setFrame(frame, display: true)
+        panel.contentView?.frame = NSRect(origin: .zero, size: frame.size)
     }
 
     private func installScreenChangeObserverIfNeeded() {
@@ -231,42 +315,70 @@ final class FloatingPanelController: NSObject {
         // setFrame(display: true) would synchronously call layoutSubtreeIfNeeded.
         DispatchQueue.main.async { [weak self] in
             guard let self, let panel = self.panel else { return }
-            let frame = self.clamped(panel.frame)
-            panel.setFrame(frame, display: true)
-            panel.contentView?.frame = NSRect(origin: .zero, size: frame.size)
-            self.persistFrameOrigin(frame)
+            self.pendingMove?.cancel()
+            self.pendingMove = nil
+            let size = self.appState.map(self.panelSize) ?? panel.frame.size
+            let frame = self.restoredFrame(for: size)
+                ?? self.clamped(NSRect(origin: panel.frame.origin, size: size))
+            self.setFrame(frame, for: panel)
             AppTelemetry.windowing.info("Floating panel clamped after screen change")
         }
     }
 }
 
-extension FloatingPanelController {
-    nonisolated static func testPlacementDefaultFrame(
-        size: NSSize,
-        visibleFrame: NSRect,
-        topInset: CGFloat
-    ) -> NSRect {
-        FloatingPanelPlacement.defaultFrame(
-            size: size,
-            visibleFrame: visibleFrame,
-            topInset: topInset
+nonisolated enum FloatingPanelPlacement {
+    struct Display {
+        let id: String
+        let visibleFrame: NSRect
+    }
+
+    struct SavedPosition: Codable {
+        let displayID: String
+        let horizontalFraction: Double
+        let verticalFraction: Double
+    }
+
+    static func savedPosition(
+        _ frame: NSRect, display: Display, previous: SavedPosition? = nil,
+        connectedDisplayIDs: [String] = [], userInitiated: Bool = true
+    ) -> SavedPosition {
+        if !userInitiated, let previous, !connectedDisplayIDs.contains(previous.displayID) { return previous }
+        let bounds = display.visibleFrame
+        return SavedPosition(
+            displayID: display.id,
+            horizontalFraction: min(1, max(0, (frame.minX - bounds.minX) / max(1, bounds.width - frame.width))),
+            verticalFraction: min(1, max(0, (frame.minY - bounds.minY) / max(1, bounds.height - frame.height)))
         )
     }
 
-    nonisolated static func testPlacementClamped(_ frame: NSRect, to visibleFrame: NSRect) -> NSRect {
-        FloatingPanelPlacement.clamped(frame, to: visibleFrame)
+    static func restoredFrame(
+        _ position: SavedPosition, size: NSSize, displays: [Display], fallbackDisplayID: String?
+    ) -> NSRect? {
+        guard position.horizontalFraction.isFinite, position.verticalFraction.isFinite,
+              let display = displays.first(where: { $0.id == position.displayID })
+                ?? displays.first(where: { $0.id == fallbackDisplayID }) ?? displays.first else { return nil }
+        let bounds = display.visibleFrame
+        return clamped(NSRect(
+            x: bounds.minX + min(1, max(0, position.horizontalFraction)) * max(0, bounds.width - size.width),
+            y: bounds.minY + min(1, max(0, position.verticalFraction)) * max(0, bounds.height - size.height),
+            width: size.width, height: size.height
+        ), to: bounds)
     }
 
-    nonisolated static func testPlacementFramePreservingTopCenter(
-        currentFrame: NSRect,
-        size: NSSize
-    ) -> NSRect {
-        FloatingPanelPlacement.framePreservingTopCenter(currentFrame: currentFrame, size: size)
+    static func snapped(_ frame: NSRect, to visibleFrame: NSRect, padding: CGFloat = 12, threshold: CGFloat = 18) -> NSRect {
+        let inset = min(max(0, padding), max(0, (visibleFrame.width - frame.width) / 2), max(0, (visibleFrame.height - frame.height) / 2))
+        let bounds = visibleFrame.insetBy(dx: inset, dy: inset)
+        var result = clamped(frame, to: visibleFrame)
+        func snap(_ current: CGFloat, between lower: CGFloat, and upper: CGFloat) -> CGFloat {
+            let nearest = abs(current - lower) <= abs(current - upper) ? lower : upper
+            return abs(current - nearest) <= threshold ? nearest : current
+        }
+        result.origin.x = snap(result.minX, between: bounds.minX, and: bounds.maxX - result.width)
+        result.origin.y = snap(result.minY, between: bounds.minY, and: bounds.maxY - result.height)
+        return result
     }
-}
 
-private enum FloatingPanelPlacement {
-    nonisolated static func defaultFrame(
+    static func defaultFrame(
         size: NSSize,
         visibleFrame: NSRect,
         topInset: CGFloat = 88
@@ -282,7 +394,7 @@ private enum FloatingPanelPlacement {
         )
     }
 
-    nonisolated static func framePreservingTopCenter(currentFrame: NSRect, size: NSSize) -> NSRect {
+    static func framePreservingTopCenter(currentFrame: NSRect, size: NSSize) -> NSRect {
         NSRect(
             x: currentFrame.midX - size.width / 2,
             y: currentFrame.maxY - size.height,
@@ -291,7 +403,7 @@ private enum FloatingPanelPlacement {
         )
     }
 
-    nonisolated static func clamped(_ frame: NSRect, to visibleFrame: NSRect) -> NSRect {
+    static func clamped(_ frame: NSRect, to visibleFrame: NSRect) -> NSRect {
         var clamped = frame
         clamped.size.width = min(clamped.width, visibleFrame.width)
         clamped.size.height = min(clamped.height, visibleFrame.height)

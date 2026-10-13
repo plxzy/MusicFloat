@@ -328,6 +328,121 @@ final class PublicLyricsProviderTests: XCTestCase {
         XCTAssertEqual(calls.values, ["appleScript"])
     }
 
+    func testCancellingOneSubscriberPreservesSharedLookup() async {
+        let calls = CallLog()
+        let gate = OneShotGate()
+        let expected = document(source: .musicApp, text: "Shared lyrics")
+        let provider = gatedProvider(calls: calls) { await gate.wait(); return expected }
+        let cancelled = expectation(description: "Cancelled subscriber returned")
+        var firstResult: LyricsProviderResult?
+        let first = Task {
+            firstResult = await provider.lyrics(for: track())
+            cancelled.fulfill()
+        }
+        await waitUntil { gate.isWaiting }
+        let second = Task { await provider.lyrics(for: track()) }
+        await drainTasks()
+
+        first.cancel()
+        await fulfillment(of: [cancelled], timeout: 1)
+        await drainTasks()
+        XCTAssertEqual(firstResult, .unavailable)
+        XCTAssertFalse(gate.wasCancelled)
+        XCTAssertEqual(gate.waitCount, 1)
+
+        gate.resume()
+        await first.value
+        let secondResult = await second.value
+        XCTAssertEqual(secondResult, .available(expected))
+        XCTAssertEqual(calls.values, ["appleScript"])
+    }
+
+    func testLastSubscriberCancellationStopsFallbackWithoutWaitingForProvider() async {
+        let calls = CallLog()
+        let gate = OneShotGate()
+        let provider = gatedProvider(calls: calls) { await gate.wait(); return nil }
+        let cancelled = expectation(description: "Cancelled subscriber returned before provider")
+        var result: LyricsProviderResult?
+        let request = Task {
+            result = await provider.lyrics(for: track())
+            cancelled.fulfill()
+        }
+        await waitUntil { gate.isWaiting }
+
+        request.cancel()
+        await fulfillment(of: [cancelled], timeout: 1)
+        await drainTasks()
+        XCTAssertEqual(result, .unavailable)
+        XCTAssertTrue(gate.wasCancelled)
+        gate.resume()
+        await request.value
+        await waitUntil { gate.didResume }
+        await drainTasks()
+        XCTAssertEqual(calls.values, ["appleScript"])
+    }
+
+    func testAbandonedLookupCannotRemoveOrCacheOverSuccessor() async {
+        let calls = CallLog()
+        let oldGate = OneShotGate()
+        let newGate = OneShotGate()
+        var attempts = 0
+        let oldDocument = document(source: .musicApp, text: "Old lyrics")
+        let newDocument = document(source: .musicApp, text: "Current lyrics")
+        let provider = gatedProvider(calls: calls) {
+            attempts += 1
+            let isOld = attempts == 1
+            await (isOld ? oldGate : newGate).wait()
+            return isOld ? oldDocument : newDocument
+        }
+        let cancelled = expectation(description: "Abandoned subscriber returned")
+        let old = Task { _ = await provider.lyrics(for: track()); cancelled.fulfill() }
+        await waitUntil { oldGate.isWaiting }
+        old.cancel()
+        await fulfillment(of: [cancelled], timeout: 1)
+
+        let current = Task { await provider.lyrics(for: track()) }
+        await waitUntil { newGate.isWaiting }
+        oldGate.resume()
+        await waitUntil { oldGate.didResume }
+        await drainTasks()
+        let joined = Task { await provider.lyrics(for: track()) }
+        await drainTasks()
+        XCTAssertEqual(attempts, 2)
+
+        newGate.resume()
+        await old.value
+        let currentResult = await current.value
+        let joinedResult = await joined.value
+        let cachedResult = await provider.lyrics(for: track())
+        XCTAssertEqual(currentResult, .available(newDocument))
+        XCTAssertEqual(joinedResult, currentResult)
+        XCTAssertEqual(cachedResult, currentResult)
+        XCTAssertEqual(attempts, 2)
+    }
+
+    private func gatedProvider(
+        calls: CallLog,
+        fetch: @escaping @MainActor () async -> LyricsDocument?
+    ) -> PublicLyricsProvider {
+        PublicLyricsProvider(dependencies: dependencies(
+            calls: calls, appleScript: nil, fetchAppleScriptLyrics: fetch,
+            mediaUserTokenConfigured: true, appleMusicWeb: nil, lrclib: nil,
+            hasAccessibilityPermission: true, ax: nil
+        ))
+    }
+
+    private func waitUntil(_ predicate: () -> Bool) async {
+        for _ in 0..<100 {
+            if predicate() { return }
+            await Task.yield()
+        }
+        XCTFail("Expected provider task to reach its gate")
+    }
+
+    private func drainTasks() async {
+        for _ in 0..<5 { await Task.yield() }
+    }
+
     private func dependencies(
         calls: CallLog,
         appleScript: LyricsDocument?,
@@ -405,22 +520,32 @@ final class PublicLyricsProviderTests: XCTestCase {
         }
     }
 
-    private final class OneShotGate {
-        private var continuation: CheckedContinuation<Void, Never>?
+    @MainActor private final class OneShotGate {
+        private var continuations: [CheckedContinuation<Void, Never>] = []
+        private(set) var wasCancelled = false
+        private(set) var didResume = false
+        private(set) var waitCount = 0
 
         var isWaiting: Bool {
-            continuation != nil
+            !continuations.isEmpty
         }
 
         func wait() async {
-            await withCheckedContinuation { continuation in
-                self.continuation = continuation
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    continuations.append(continuation)
+                    waitCount += 1
+                }
+                didResume = true
+            } onCancel: {
+                Task { @MainActor [weak self] in self?.wasCancelled = true }
             }
         }
 
         func resume() {
-            continuation?.resume()
-            continuation = nil
+            let waiting = continuations
+            continuations.removeAll()
+            for continuation in waiting { continuation.resume() }
         }
     }
 

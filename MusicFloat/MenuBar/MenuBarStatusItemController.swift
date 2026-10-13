@@ -4,6 +4,8 @@ import OSLog
 @MainActor
 struct MenuBarStatusItemCommands {
     let toggleOverlay: () -> Void
+    let toggleOverlayLock: () -> Void
+    let toggleEdgeSnapping: () -> Void
     let toggleMockPreview: () -> Void
     let toggleLiveAppleMusic: () -> Void
     let nudgeLyricOffset: (Double) -> Void
@@ -66,6 +68,13 @@ final class MenuBarStatusItemController: NSObject, NSMenuDelegate {
             action: #selector(toggleOverlay),
             keyEquivalent: "l"
         ))
+
+        let lockItem = actionItem(title: "Lock Overlay Position", action: #selector(toggleOverlayLock))
+        lockItem.state = appState.isOverlayLocked ? .on : .off
+        menu.addItem(lockItem)
+        let snapItem = actionItem(title: "Snap Overlay to Screen Edges", action: #selector(toggleEdgeSnapping))
+        snapItem.state = appState.snapsOverlayToEdges ? .on : .off
+        menu.addItem(snapItem)
 
         menu.addItem(actionItem(
             title: "Settings...",
@@ -223,6 +232,10 @@ final class MenuBarStatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleOverlay() {
         commands?.toggleOverlay()
     }
+
+    @objc private func toggleOverlayLock() { commands?.toggleOverlayLock() }
+
+    @objc private func toggleEdgeSnapping() { commands?.toggleEdgeSnapping() }
 
     @objc private func toggleMockPreview() {
         commands?.toggleMockPreview()

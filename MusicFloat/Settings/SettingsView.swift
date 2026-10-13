@@ -26,55 +26,24 @@ struct SettingsView: View {
     @State private var supportedTranslationLanguages: [Locale.Language] = []
     #if ENABLE_APPLE_TRANSLATION
     @State private var preparationConfiguration: TranslationSession.Configuration?
+    @State private var preparationRequest: PreparedTranslationRequest?
     #endif
 
     var body: some View {
         #if ENABLE_APPLE_TRANSLATION
+        let request = preparationRequest
         settingsForm
             .translationTask(preparationConfiguration) { session in
-                let document = appState.lyricsDocument
-                let targetLanguageIdentifier = appState.preferredTranslationLanguageIdentifier
-                let activeTrackID = appState.playerState.track?.id
-                do {
-                    try await session.prepareTranslation()
-                    preparationConfiguration = nil
-                    AppTelemetry.settings.info("Translation preparation completed")
-
-                    appState.setTranslationRuntimeState(.translating)
-                    if let translation = try await PreparedTranslationSessionTranslator.translation(
-                        using: session,
-                        for: document,
-                        targetLanguageIdentifier: targetLanguageIdentifier
-                    ) {
-                        guard appState.playerState.track?.id == activeTrackID,
-                              appState.lyricsDocument.hasSameTranslationContent(as: document),
-                              appState.preferredTranslationLanguageIdentifier == targetLanguageIdentifier else {
-                            AppTelemetry.settings.info("Prepared translation ignored because live context changed")
-                            appState.setTranslationRuntimeState(.idle)
-                            onTranslationPreparationCompleted()
-                            return
-                        }
-                        appState.applyTranslation(translation)
-                        appState.setTranslationRuntimeState(.ready)
-                        AppTelemetry.settings.info("Prepared translation completed")
-                        return
-                    }
-
-                    appState.setTranslationRuntimeState(.idle)
-                    onTranslationPreparationCompleted()
-                } catch is CancellationError {
-                    preparationConfiguration = nil
-                    appState.setTranslationRuntimeState(.idle)
-                    AppTelemetry.settings.info("Translation preparation cancelled")
-                } catch {
-                    preparationConfiguration = nil
-                    let reason = Self.translationFailureMessage(
-                        prefix: "Translation preparation failed",
-                        error: error
-                    )
-                    appState.setTranslationRuntimeState(.failed(reason))
-                    AppTelemetry.settings.error("Translation preparation failed: \(error.localizedDescription, privacy: .public)")
+                guard let request else { return }
+                await prepareTranslationLanguages(with: session, request: request)
+            }
+            .task(id: appState.translationPreparationContextID) {
+                if let preparationRequest, !appState.ownsPreparedTranslationRequest(preparationRequest) {
+                    cancelTranslationPreparation()
                 }
+            }
+            .onDisappear {
+                cancelTranslationPreparation()
             }
         #else
         settingsForm
@@ -148,14 +117,9 @@ struct SettingsView: View {
                 LabeledContent("Status", value: appState.translationRuntimeState.detailText)
 
                 #if ENABLE_APPLE_TRANSLATION
-                if let download = appState.pendingTranslationDownload {
+                if appState.pendingTranslationDownload != nil {
                     Button("Prepare Translation Languages") {
-                        preparationConfiguration = TranslationSession.Configuration(
-                            source: Locale.Language(identifier: download.source),
-                            target: Locale.Language(identifier: download.target),
-                            preferredStrategy: .lowLatency
-                        )
-                        AppTelemetry.settings.info("Translation preparation requested")
+                        scheduleTranslationPreparation()
                     }
                 }
                 #endif
@@ -272,13 +236,53 @@ struct SettingsView: View {
         Locale.current.localizedString(forIdentifier: identifier) ?? identifier
     }
 
-    private static func translationFailureMessage(prefix: String, error: any Error) -> String {
-        let detail = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !detail.isEmpty else {
-            return prefix
-        }
-        return "\(prefix): \(detail)"
+    #if ENABLE_APPLE_TRANSLATION
+    private func scheduleTranslationPreparation() {
+        guard let request = appState.beginPreparedTranslationRequest() else { return }
+        var configuration = preparationConfiguration ?? TranslationSession.Configuration(preferredStrategy: .lowLatency)
+        configuration.source = Locale.Language(identifier: request.sourceLanguageIdentifier)
+        configuration.target = Locale.Language(identifier: request.targetLanguageIdentifier)
+        configuration.invalidate()
+        preparationRequest = request
+        preparationConfiguration = configuration
+        AppTelemetry.settings.info("Translation preparation requested")
     }
+
+    private func cancelTranslationPreparation() {
+        if let preparationRequest {
+            _ = appState.cancelPreparedTranslation(preparationRequest)
+        }
+        preparationRequest = nil
+        preparationConfiguration = nil
+    }
+
+    private func prepareTranslationLanguages(
+        with session: TranslationSession,
+        request: PreparedTranslationRequest
+    ) async {
+        defer {
+            if preparationRequest?.id == request.id {
+                preparationRequest = nil
+                preparationConfiguration = nil
+            }
+        }
+        let outcome = await PreparedTranslationWork.run(
+            request: request,
+            appState: appState,
+            prepare: { try await session.prepareTranslation() },
+            translate: { document, target in
+                try await PreparedTranslationSessionTranslator.translation(
+                    using: session,
+                    for: document,
+                    targetLanguageIdentifier: target
+                )
+            }
+        )
+        if outcome == .retry {
+            onTranslationPreparationCompleted()
+        }
+    }
+    #endif
 
     private static func languageList(
         _ languages: [Locale.Language],

@@ -133,8 +133,11 @@ final class PublicLyricsProvider: LyricsProvider {
 
     private var memoryCache: [String: CacheEntry] = [:]
     private struct InFlightLookup {
-        let lookupID: String
-        let task: Task<LookupOutcome, Never>
+        let id: UUID
+        let task: Task<Void, Never>
+        var subscribers: [UUID: CheckedContinuation<LyricsProviderResult, Never>]
+
+        var lookupID: String { String(id.uuidString.prefix(8)) }
     }
 
     private var inFlightTasks: [String: InFlightLookup] = [:]
@@ -164,37 +167,70 @@ final class PublicLyricsProvider: LyricsProvider {
     }
 
     private func lyricsImpl(for track: NowPlayingTrack) async -> LyricsProviderResult {
+        guard !Task.isCancelled else { return .unavailable }
         if track.providerName.lowercased().contains("mock") {
             return .unavailable
         }
         if let cached = cachedResult(for: track.id, now: dependencies.now()) {
             return cached
         }
-        if let inFlight = inFlightTasks[track.id] {
-            AppTelemetry.performance.info(
-                "Lyrics lookup joined in-flight task lookup=\(inFlight.lookupID, privacy: .public)"
-            )
-            let outcome = await inFlight.task.value
-            if !Task.isCancelled {
-                cache(outcome, for: track.id, now: dependencies.now())
+        let subscriberID = UUID()
+        return await withTaskCancellationHandler {
+            let result: LyricsProviderResult = await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: .unavailable)
+                    return
+                }
+                if let inFlight = inFlightTasks[track.id] {
+                    inFlightTasks[track.id]?.subscribers[subscriberID] = continuation
+                    AppTelemetry.performance.info(
+                        "Lyrics lookup joined in-flight task lookup=\(inFlight.lookupID, privacy: .public)"
+                    )
+                } else {
+                    let id = UUID()
+                    let task = Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        let outcome = await self.fetchLyricsUncached(
+                            for: track, lookupID: String(id.uuidString.prefix(8))
+                        )
+                        self.finishLookup(outcome, for: track.id, id: id)
+                    }
+                    inFlightTasks[track.id] = InFlightLookup(
+                        id: id, task: task, subscribers: [subscriberID: continuation]
+                    )
+                }
             }
-            return outcome.result
+            return Task.isCancelled ? .unavailable : result
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancelSubscription(for: track.id, subscriberID: subscriberID)
+            }
         }
+    }
 
-        let lookupID = Self.makeLookupID()
-        let task = Task { @MainActor [self, track, lookupID] in
-            await fetchLyricsUncached(for: track, lookupID: lookupID)
+    private func cancelSubscription(for trackID: String, subscriberID: UUID) {
+        guard var lookup = inFlightTasks[trackID],
+              let continuation = lookup.subscribers.removeValue(forKey: subscriberID) else { return }
+        if lookup.subscribers.isEmpty {
+            inFlightTasks.removeValue(forKey: trackID)
+            lookup.task.cancel()
+        } else {
+            inFlightTasks[trackID] = lookup
         }
-        inFlightTasks[track.id] = InFlightLookup(lookupID: lookupID, task: task)
-        let outcome = await task.value
-        inFlightTasks.removeValue(forKey: track.id)
-        if !Task.isCancelled {
-            cache(outcome, for: track.id, now: dependencies.now())
+        continuation.resume(returning: .unavailable)
+    }
+
+    private func finishLookup(_ outcome: LookupOutcome, for trackID: String, id: UUID) {
+        guard let lookup = inFlightTasks[trackID], lookup.id == id else { return }
+        inFlightTasks.removeValue(forKey: trackID)
+        cache(outcome, for: trackID, now: dependencies.now())
+        for continuation in lookup.subscribers.values {
+            continuation.resume(returning: outcome.result)
         }
-        return outcome.result
     }
 
     private func fetchLyricsUncached(for track: NowPlayingTrack, lookupID: String) async -> LookupOutcome {
+        guard !Task.isCancelled else { return .unavailable() }
         AppTelemetry.performance.info(
             "Lyrics lookup started lookup=\(lookupID, privacy: .public)"
         )
@@ -206,6 +242,7 @@ final class PublicLyricsProvider: LyricsProvider {
         var completedAXFallback = false
         let appleScriptStartedAt = Date()
         let appleScriptDoc = await dependencies.fetchAppleScriptLyrics()
+        guard !Task.isCancelled else { return .unavailable() }
         AppTelemetry.performance.notice(
             "Lyrics stage AppleScript finished lookup=\(lookupID, privacy: .public) elapsed=\(Date().timeIntervalSince(appleScriptStartedAt), privacy: .public)"
         )
@@ -223,6 +260,7 @@ final class PublicLyricsProvider: LyricsProvider {
             do {
                 let webStartedAt = Date()
                 if let doc = try await dependencies.fetchAppleMusicWebLyrics(track, lookupID) {
+                    guard !Task.isCancelled else { return .unavailable() }
                     AppTelemetry.performance.notice(
                         "Lyrics stage AppleMusicWeb finished lookup=\(lookupID, privacy: .public) elapsed=\(Date().timeIntervalSince(webStartedAt), privacy: .public) result=hit"
                     )
@@ -240,6 +278,7 @@ final class PublicLyricsProvider: LyricsProvider {
                 AppTelemetry.performance.error("AM web error lookup=\(lookupID, privacy: .public) reason=\(error.localizedDescription, privacy: .public)")
             }
         }
+        guard !Task.isCancelled else { return .unavailable() }
 
         // Fallback gate — when disabled we stop here and surface "no lyrics"
         // so the user sees the authoritative Apple result instead of a
@@ -254,6 +293,7 @@ final class PublicLyricsProvider: LyricsProvider {
         do {
             let lrclibStartedAt = Date()
             if let doc = try await dependencies.fetchLRCLIBLyrics(track, lookupID) {
+                guard !Task.isCancelled else { return .unavailable() }
                 AppTelemetry.performance.notice(
                     "Lyrics stage LRCLIB finished lookup=\(lookupID, privacy: .public) elapsed=\(Date().timeIntervalSince(lrclibStartedAt), privacy: .public) result=hit"
                 )
@@ -280,6 +320,7 @@ final class PublicLyricsProvider: LyricsProvider {
             sawTransientProviderFailure = true
             AppTelemetry.performance.error("LRCLIB error lookup=\(lookupID, privacy: .public) reason=\(error.localizedDescription, privacy: .public)")
         }
+        guard !Task.isCancelled else { return .unavailable() }
 
         // 4) AX panel — final catalog fallback when LRCLIB has nothing.
         if dependencies.hasAccessibilityPermission() {
@@ -311,10 +352,6 @@ final class PublicLyricsProvider: LyricsProvider {
 
     private static let accessibilityPermissionMessage =
         "Allow MusicFloat in Privacy & Security > Accessibility to use Music lyrics."
-
-    private static func makeLookupID() -> String {
-        String(UUID().uuidString.prefix(8))
-    }
 
     private func cachedResult(for key: String, now: Date) -> LyricsProviderResult? {
         guard let entry = memoryCache[key] else {

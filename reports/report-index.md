@@ -49,6 +49,14 @@ Use this index to route durable findings without opening every report.
 
 ## Current Follow-up State
 
+- 2026-10-13: the seven review follow-ups and visible playback recovery are
+  implemented; monitor-aware restoration, position locking, and optional snapping
+  are added. Full gate passes 199 tests. See `reports/bugs-and-issues.md` for
+  scope and remaining native acceptance, and `reports/lyrics-accuracy-status.md`
+  for live evidence. Non-admin direct samples now record their app-stderr logging
+  lane and limited process-network coverage; older samples are not equal-lane
+  performance comparisons.
+
 - Same-day report-improvement work addressed the idle launch, default Release
   Translation linkage, targeted telemetry redaction, visible panel width resize,
   settings lifecycle, provider-cache hardening, parser isolation, strict profile

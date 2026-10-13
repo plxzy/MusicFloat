@@ -201,6 +201,44 @@ final class TTMLParserTests: XCTestCase {
         ])
     }
 
+    func testNestedSpanPreservesTextAroundTimedChild() {
+        let ttml = """
+        <tt><body><div><p begin="1s" end="4s"><span>before <span begin="1s" end="2s">inside</span> after</span></p></div></body></tt>
+        """
+
+        let line = TTMLParser.parse(ttml: ttml)?.lines.first
+
+        XCTAssertEqual(line?.text, "before inside after")
+        XCTAssertEqual(line?.syllables, [LyricSyllable(text: "inside", startTime: 1, endTime: 2)])
+    }
+
+    func testTimedSpanPreservesTimingThroughNestedStyling() {
+        let ttml = """
+        <tt><body><div><p begin="1s" end="3s"><span begin="1s" end="2s">Hel<span>lo <span>there</span></span>!</span></p></div></body></tt>
+        """
+
+        let line = TTMLParser.parse(ttml: ttml)?.lines.first
+
+        XCTAssertEqual(line?.text, "Hello there!")
+        XCTAssertEqual(line?.syllables, [LyricSyllable(text: "Hello there!", startTime: 1, endTime: 2)])
+    }
+
+    func testTimedWrapperUsesChildTimingsWithoutDuplicatingText() {
+        let ttml = """
+        <tt xmlns:itunes="http://music.apple.com/lyric-ttml-internal" itunes:timing="Word"><body><div>
+        <p begin="1s" end="4s"><span begin="1s" end="4s"><span begin="1s" end="2s">One</span><span begin="2s" end="3s">two</span></span></p>
+        </div></body></tt>
+        """
+
+        let line = TTMLParser.parse(ttml: ttml)?.lines.first
+
+        XCTAssertEqual(line?.text, "One two")
+        XCTAssertEqual(line?.syllables, [
+            LyricSyllable(text: "One ", startTime: 1, endTime: 2),
+            LyricSyllable(text: "two", startTime: 2, endTime: 3)
+        ])
+    }
+
     @MainActor
     func testParsesHourMinuteSecondAndSecondsTimecodes() {
         XCTAssertEqual(TTMLParser.parseTimecode("01:02:03.456"), 3723.456)

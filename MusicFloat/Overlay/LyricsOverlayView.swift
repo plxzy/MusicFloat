@@ -57,18 +57,23 @@ struct LyricsOverlayView: View {
     @State private var draftPlaybackPosition = 0.0
     #if ENABLE_APPLE_TRANSLATION
     @State private var preparationConfiguration: TranslationSession.Configuration?
-    @State private var activePreparationIdentifier: String?
+    @State private var preparationRequest: PreparedTranslationRequest?
     @State private var preparedTranslationIdentifiers: Set<String> = []
     #endif
 
     var body: some View {
         #if ENABLE_APPLE_TRANSLATION
+        let request = preparationRequest
         content
             .translationTask(preparationConfiguration) { session in
-                await prepareTranslationLanguages(with: session)
+                guard let request else { return }
+                await prepareTranslationLanguages(with: session, request: request)
             }
-            .task(id: translationPreparationRequestIdentifier) {
+            .task(id: appState.translationPreparationContextID) {
                 scheduleTranslationPreparationIfNeeded()
+            }
+            .onDisappear {
+                cancelTranslationPreparation()
             }
         #else
         content
@@ -96,7 +101,7 @@ struct LyricsOverlayView: View {
         // NSHostingView consumes mouse-down events, so the panel's
         // isMovableByWindowBackground never triggers. Child controls (buttons,
         // the scrub DragGesture) still win over this parent gesture.
-        .gesture(WindowDragGesture())
+        .gesture(WindowDragGesture(), isEnabled: !appState.isOverlayLocked)
         .onAppear {
             AppTelemetry.windowing.info("Lyrics overlay view appeared")
             syncDraftVolume()
@@ -432,78 +437,61 @@ struct LyricsOverlayView: View {
     }
 
     #if ENABLE_APPLE_TRANSLATION
-    private var translationPreparationRequestIdentifier: String? {
-        guard let download = appState.pendingTranslationDownload else { return nil }
-        return "\(download.source)->\(download.target)"
-    }
-
     private func scheduleTranslationPreparationIfNeeded() {
-        guard let download = appState.pendingTranslationDownload else { return }
-        let identifier = "\(download.source)->\(download.target)"
-        guard activePreparationIdentifier != identifier else { return }
-        guard !preparedTranslationIdentifiers.contains(identifier) else { return }
-
-        activePreparationIdentifier = identifier
-        preparationConfiguration = TranslationSession.Configuration(
-            source: Locale.Language(identifier: download.source),
-            target: Locale.Language(identifier: download.target),
-            preferredStrategy: .lowLatency
-        )
+        if let preparationRequest, appState.ownsPreparedTranslationRequest(preparationRequest) { return }
+        guard appState.isOverlayVisible,
+              let download = appState.pendingTranslationDownload,
+              !preparedTranslationIdentifiers.contains("\(download.source)->\(download.target)"),
+              let request = appState.beginPreparedTranslationRequest() else {
+            cancelTranslationPreparation()
+            return
+        }
+        var configuration = preparationConfiguration ?? TranslationSession.Configuration(preferredStrategy: .lowLatency)
+        configuration.source = Locale.Language(identifier: request.sourceLanguageIdentifier)
+        configuration.target = Locale.Language(identifier: request.targetLanguageIdentifier)
+        configuration.invalidate()
+        preparationRequest = request
+        preparationConfiguration = configuration
         AppTelemetry.windowing.notice(
-            "Overlay translation preparation requested source=\(download.source, privacy: .public) target=\(download.target, privacy: .public)"
+            "Overlay translation preparation requested source=\(request.sourceLanguageIdentifier, privacy: .public) target=\(request.targetLanguageIdentifier, privacy: .public)"
         )
     }
 
-    private func prepareTranslationLanguages(with session: TranslationSession) async {
-        let document = appState.lyricsDocument
-        let targetLanguageIdentifier = appState.preferredTranslationLanguageIdentifier
-        let activeTrackID = appState.playerState.track?.id
+    private func cancelTranslationPreparation() {
+        if let preparationRequest {
+            _ = appState.cancelPreparedTranslation(preparationRequest)
+        }
+        preparationRequest = nil
+        preparationConfiguration = nil
+    }
 
-        do {
-            try await session.prepareTranslation()
-            if let activePreparationIdentifier {
-                preparedTranslationIdentifiers.insert(activePreparationIdentifier)
+    private func prepareTranslationLanguages(
+        with session: TranslationSession,
+        request: PreparedTranslationRequest
+    ) async {
+        defer {
+            if preparationRequest?.id == request.id {
+                preparationRequest = nil
+                preparationConfiguration = nil
             }
-            preparationConfiguration = nil
-            activePreparationIdentifier = nil
-            AppTelemetry.windowing.notice("Overlay translation preparation completed")
-
-            appState.setTranslationRuntimeState(.translating)
-            if let translation = try await PreparedTranslationSessionTranslator.translation(
-                using: session,
-                for: document,
-                targetLanguageIdentifier: targetLanguageIdentifier
-            ) {
-                guard appState.playerState.track?.id == activeTrackID,
-                      appState.lyricsDocument.hasSameTranslationContent(as: document),
-                      appState.preferredTranslationLanguageIdentifier == targetLanguageIdentifier else {
-                    AppTelemetry.windowing.notice("Prepared translation ignored because live context changed")
-                    appState.setTranslationRuntimeState(.idle)
-                    onTranslationPreparationCompleted()
-                    return
-                }
-                appState.applyTranslation(translation)
-                appState.setTranslationRuntimeState(.ready)
-                AppTelemetry.windowing.notice(
-                    "Prepared translation ready source=\(translation.sourceLanguageIdentifier ?? "unknown", privacy: .public) target=\(translation.targetLanguageIdentifier, privacy: .public) lines=\(translation.lines.count, privacy: .public)"
+        }
+        let outcome = await PreparedTranslationWork.run(
+            request: request,
+            appState: appState,
+            prepare: { try await session.prepareTranslation() },
+            translate: { document, target in
+                try await PreparedTranslationSessionTranslator.translation(
+                    using: session,
+                    for: document,
+                    targetLanguageIdentifier: target
                 )
-                return
             }
-
-            appState.setTranslationRuntimeState(.idle)
+        )
+        if outcome == .ready || outcome == .retry {
+            preparedTranslationIdentifiers.insert("\(request.sourceLanguageIdentifier)->\(request.targetLanguageIdentifier)")
+        }
+        if outcome == .retry {
             onTranslationPreparationCompleted()
-        } catch is CancellationError {
-            preparationConfiguration = nil
-            activePreparationIdentifier = nil
-            appState.setTranslationRuntimeState(.idle)
-            AppTelemetry.windowing.info("Overlay translation preparation cancelled")
-        } catch {
-            preparationConfiguration = nil
-            activePreparationIdentifier = nil
-            let detail = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-            let reason = detail.isEmpty ? "Translation preparation failed" : "Translation preparation failed: \(detail)"
-            appState.setTranslationRuntimeState(.failed(reason))
-            AppTelemetry.windowing.error("Overlay translation preparation failed: \(error.localizedDescription, privacy: .public)")
         }
     }
     #endif

@@ -10,6 +10,7 @@ final class PlayerController {
     /// playing, to correct any drift that has accumulated since the last
     /// distributed-notification event.
     private static let resyncInterval: TimeInterval = 1.0
+    private static let idleResyncInterval: TimeInterval = 3.0
     /// Threshold for snapping our interpolated elapsedTime to Music's
     /// authoritative position. Smaller deltas are ignored so jitter from
     /// AppleScript's coarse `player position` doesn't fight the smooth tick.
@@ -30,6 +31,7 @@ final class PlayerController {
 
     private let bridge: any MusicAppBridge
     private let liveBridgeFactory: @MainActor () -> any MusicAppBridge
+    private let musicAppIsRunning: @MainActor () -> Bool
     private var refreshTask: Task<Void, Never>?
     private var liveTask: Task<Void, Never>?
     private var liveTickTask: Task<Void, Never>?
@@ -41,10 +43,12 @@ final class PlayerController {
 
     init(
         bridge: any MusicAppBridge,
-        liveBridgeFactory: @escaping @MainActor () -> any MusicAppBridge = { PublicAppleMusicAppBridge() }
+        liveBridgeFactory: @escaping @MainActor () -> any MusicAppBridge = { PublicAppleMusicAppBridge() },
+        musicAppIsRunning: @escaping @MainActor () -> Bool = { AppleMusicEventListener.isMusicAppRunning }
     ) {
         self.bridge = bridge
         self.liveBridgeFactory = liveBridgeFactory
+        self.musicAppIsRunning = musicAppIsRunning
     }
 
     // MARK: - Live Apple Music
@@ -73,20 +77,22 @@ final class PlayerController {
         liveTask = Task { @MainActor [weak self, weak appState] in
             guard let self, let appState else { return }
 
+            // Register before the first suspension so startup events are buffered.
+            let events = bridge.events()
             let initial = await bridge.currentState()
             guard !Task.isCancelled, self.liveSessionID == sessionID else { return }
-            let volume = await bridge.currentVolume()
-            guard !Task.isCancelled, self.liveSessionID == sessionID else { return }
-            appState.setMusicVolume(volume)
             AppTelemetry.performance.info(
                 "Live prime: status=\(initial.playbackStatus.rawValue, privacy: .public) hasTrack=\(initial.track != nil) elapsed=\(initial.elapsedTime) musicRunning=\(AppleMusicEventListener.isMusicAppRunning)"
             )
             appState.updatePlayerState(initial)
-            var lastTrackID = initial.track?.id
             self.restartLiveTick(appState: appState)
             onTrackChanged?(initial.track)
 
-            for await state in bridge.events() {
+            let volume = await bridge.currentVolume()
+            guard !Task.isCancelled, self.liveSessionID == sessionID else { return }
+            appState.setMusicVolume(volume)
+
+            for await state in events {
                 guard !Task.isCancelled, self.liveSessionID == sessionID else { break }
                 let previousTrackID = appState.playerState.track?.id
                 let incomingTrackID = state.track?.id
@@ -104,11 +110,10 @@ final class PlayerController {
                     )
                 }
                 appState.updatePlayerState(state)
-                if state.track?.id != lastTrackID {
+                if incomingTrackID != previousTrackID {
                     AppTelemetry.performance.info(
-                        "Live track changed previous=\(NowPlayingTrack.telemetryID(for: lastTrackID), privacy: .public) next=\(state.track?.telemetryID ?? "none", privacy: .public)"
+                        "Live track changed previous=\(NowPlayingTrack.telemetryID(for: previousTrackID), privacy: .public) next=\(state.track?.telemetryID ?? "none", privacy: .public)"
                     )
-                    lastTrackID = state.track?.id
                     onTrackChanged?(state.track)
                 }
                 // Re-sync tick to the fresh elapsedTime from the event so
@@ -305,9 +310,11 @@ final class PlayerController {
                 return
             }
 
-            appState.updatePlayerState(snapshot)
-            if snapshot.track?.id != previousTrackID {
-                self.liveTrackChangedCallback?(snapshot.track)
+            if snapshot.track != nil || !self.musicAppIsRunning() {
+                appState.updatePlayerState(snapshot)
+                if snapshot.track?.id != previousTrackID {
+                    self.liveTrackChangedCallback?(snapshot.track)
+                }
             }
             self.restartLiveTick(appState: appState)
             AppTelemetry.performance.info(
@@ -316,18 +323,16 @@ final class PlayerController {
         }
     }
 
-    /// Advances live elapsed time by wall-clock delta while live mode is
-    /// playing and the overlay is visible. Periodically re-pulls `player
-    /// position` from Music.app to correct drift.
+    /// Reconciles playback while the overlay is visible, including recovery
+    /// from a failed prime or missed resume event. Only playing tracks advance
+    /// elapsed time; waiting and paused states use a slower watchdog cadence.
     private func restartLiveTick(appState: AppState) {
         liveTickTask?.cancel()
         liveTickTask = nil
 
-        guard liveSessionID != nil,
+        guard let sessionID = liveSessionID,
               appState.isLiveModeRunning,
-              appState.isOverlayVisible,
-              appState.playerState.playbackStatus == .playing,
-              appState.playerState.track != nil else {
+              appState.isOverlayVisible else {
             return
         }
 
@@ -347,17 +352,19 @@ final class PlayerController {
                 // cadence. Syllable fill is now animated locally in the active
                 // lyric row, so the whole overlay no longer needs a 120 ms
                 // app-state tick just to move the karaoke mask.
-                let sleep = Self.liveTickInterval(
+                let isPlaying = appState.playerState.playbackStatus == .playing
+                    && appState.playerState.track != nil
+                let sleep = isPlaying ? Self.liveTickInterval(
                     currentElapsed: elapsed,
                     lyricsDocument: appState.lyricsDocument,
                     lyricOffsetSeconds: appState.effectiveLyricOffsetSeconds,
                     duration: appState.playerState.track?.duration
-                )
+                ) : Self.idleResyncInterval
                 try? await Task.sleep(nanoseconds: UInt64(sleep * 1_000_000_000))
                 if Task.isCancelled { return }
 
                 let now = Date()
-                elapsed += now.timeIntervalSince(lastWall)
+                if isPlaying { elapsed += now.timeIntervalSince(lastWall) }
                 lastWall = now
                 if AppTelemetry.isVerbosePlaybackTelemetryEnabled {
                     AppTelemetry.performance.debug(
@@ -373,9 +380,23 @@ final class PlayerController {
                    let bridge = self.liveBridge {
                     lastResync = now
                     let snapshot = await bridge.currentState()
-                    if Task.isCancelled { return }
-                    if snapshot.track != nil {
+                    guard !Task.isCancelled, self.liveSessionID == sessionID else { return }
+                    // A nil-track snapshot can also mean an AppleScript failure.
+                    // Only process exit independently confirms disconnection.
+                    if snapshot.track != nil || !self.musicAppIsRunning() {
                         consecutiveResyncFailures = 0
+                        let snapshot = snapshot.track == nil ? PlayerState.disconnected : snapshot
+                        let previousTrackID = appState.playerState.track?.id
+                        let trackChanged = snapshot.track?.id != previousTrackID
+                        if trackChanged || snapshot.playbackStatus != appState.playerState.playbackStatus {
+                            appState.updatePlayerState(snapshot)
+                            if trackChanged { self.liveTrackChangedCallback?(snapshot.track) }
+                            elapsed = snapshot.elapsedTime
+                            lastWall = Date()
+                            AppTelemetry.performance.info(
+                                "Live watchdog reconciled status=\(snapshot.playbackStatus.rawValue, privacy: .public) trackChanged=\(trackChanged)"
+                            )
+                        }
                         let decision = Self.liveResyncDecision(
                             localElapsed: elapsed,
                             currentTrackID: appState.playerState.track?.id,
@@ -409,9 +430,10 @@ final class PlayerController {
                     }
                 }
 
-                guard appState.playerState.playbackStatus == .playing,
-                      appState.playerState.track != nil else { return }
-                appState.updateLiveElapsedTime(elapsed)
+                if appState.playerState.playbackStatus == .playing,
+                   appState.playerState.track != nil {
+                    appState.updateLiveElapsedTime(elapsed)
+                }
             }
         }
     }

@@ -73,10 +73,13 @@ nonisolated enum TTMLParser {
         private var pEnd: TimeInterval?
         private var pSpans: [LyricSyllable] = []
         private var pText: String = ""
-        private var spanBegin: TimeInterval?
-        private var spanEnd: TimeInterval?
-        private var spanText: String = ""
-        private var inSpan = false
+        private struct SpanContext {
+            let begin: TimeInterval?
+            let end: TimeInterval?
+            var text = ""
+            var syllables: [LyricSyllable] = []
+        }
+        private var spans: [SpanContext] = []
         private var nextID = 0
         private var timingMode: String?
 
@@ -98,24 +101,25 @@ nonisolated enum TTMLParser {
                 pEnd = TTMLParser.parseTimecode(attributeDict["end"])
                 pSpans.removeAll()
                 pText = ""
+                spans.removeAll()
             case "span":
                 guard inP else { return }
-                inSpan = true
-                spanBegin = TTMLParser.parseTimecode(attributeDict["begin"])
-                spanEnd = TTMLParser.parseTimecode(attributeDict["end"])
-                spanText = ""
+                spans.append(SpanContext(
+                    begin: TTMLParser.parseTimecode(attributeDict["begin"]),
+                    end: TTMLParser.parseTimecode(attributeDict["end"])
+                ))
             case "br":
                 // Apple uses <br/> for in-line breaks within a paragraph.
                 // Preserve as a space so words don't run together.
-                if inSpan { spanText += " " } else if inP { pText += " " }
+                if !spans.isEmpty { spans[spans.count - 1].text += " " } else if inP { pText += " " }
             default:
                 break
             }
         }
 
         func parser(_ parser: XMLParser, foundCharacters string: String) {
-            if inSpan {
-                spanText += string
+            if !spans.isEmpty {
+                spans[spans.count - 1].text += string
             } else if inP {
                 pText += string
             }
@@ -130,15 +134,15 @@ nonisolated enum TTMLParser {
             let name = localName(elementName)
             switch name {
             case "span":
-                guard inSpan else { return }
-                appendSpanText()
-                inSpan = false
-                spanBegin = nil
-                spanEnd = nil
-                spanText = ""
+                guard let span = spans.popLast() else { return }
+                if var parent = spans.popLast() {
+                    appendSpan(span, to: &parent.text, syllables: &parent.syllables)
+                    spans.append(parent)
+                } else {
+                    appendSpan(span, to: &pText, syllables: &pSpans)
+                }
             case "p":
-                let cleaned = pText
-                    .replacingOccurrences(of: "  ", with: " ")
+                let cleaned = normalizeInlineWhitespace(pText)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !cleaned.isEmpty {
                     lines.append(LyricLine(
@@ -155,18 +159,19 @@ nonisolated enum TTMLParser {
                 pEnd = nil
                 pSpans.removeAll()
                 pText = ""
+                spans.removeAll()
             default:
                 break
             }
         }
 
-        private func appendSpanText() {
-            let normalizedText = normalizeInlineWhitespace(spanText)
+        private func appendSpan(_ span: SpanContext, to text: inout String, syllables: inout [LyricSyllable]) {
+            let normalizedText = normalizeInlineWhitespace(span.text)
             let trimmedText = normalizedText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedText.isEmpty else {
-                if spanText.contains(where: \.isWhitespace) {
-                    appendSpaceToPreviousSyllable()
-                    pText = appendSpaceIfNeeded(to: pText)
+                if span.text.contains(where: \.isWhitespace) {
+                    appendSpaceToPreviousSyllable(in: &syllables)
+                    text = appendSpaceIfNeeded(to: text)
                 }
                 return
             }
@@ -174,21 +179,24 @@ nonisolated enum TTMLParser {
             let startsWithSpace = normalizedText.first?.isWhitespace == true
             let endsWithSpace = normalizedText.last?.isWhitespace == true
 
-            if startsWithSpace || shouldInferSpace(before: trimmedText) {
-                appendSpaceToPreviousSyllable()
-                pText = appendSpaceIfNeeded(to: pText)
+            if startsWithSpace || shouldInferSpace(before: trimmedText, previous: syllables.last?.text) {
+                appendSpaceToPreviousSyllable(in: &syllables)
+                text = appendSpaceIfNeeded(to: text)
             }
 
             let visibleText = endsWithSpace ? "\(trimmedText) " : trimmedText
-            if let begin = spanBegin, let end = spanEnd {
-                pSpans.append(LyricSyllable(text: visibleText, startTime: begin, endTime: end))
+            if !span.syllables.isEmpty {
+                // Prefer explicit child timings over an overlapping wrapper.
+                syllables.append(contentsOf: span.syllables)
+            } else if let begin = span.begin, let end = span.end {
+                syllables.append(LyricSyllable(text: visibleText, startTime: begin, endTime: end))
             }
-            pText += visibleText
+            text += visibleText
         }
 
-        private func shouldInferSpace(before text: String) -> Bool {
+        private func shouldInferSpace(before text: String, previous previousText: String?) -> Bool {
             guard timingMode?.localizedCaseInsensitiveCompare("Word") == .orderedSame,
-                  let previousText = pSpans.last?.text,
+                  let previousText,
                   previousText.last?.isWhitespace != true,
                   let previous = previousText.last,
                   let current = text.first else {
@@ -198,12 +206,12 @@ nonisolated enum TTMLParser {
             return previous.shouldSpaceBeforeNextWord && current.canStartInferredWordLikeSpan
         }
 
-        private func appendSpaceToPreviousSyllable() {
-            guard let last = pSpans.last, last.text.last?.isWhitespace != true else {
+        private func appendSpaceToPreviousSyllable(in syllables: inout [LyricSyllable]) {
+            guard let last = syllables.last, last.text.last?.isWhitespace != true else {
                 return
             }
 
-            pSpans[pSpans.count - 1] = LyricSyllable(
+            syllables[syllables.count - 1] = LyricSyllable(
                 text: "\(last.text) ",
                 startTime: last.startTime,
                 endTime: last.endTime

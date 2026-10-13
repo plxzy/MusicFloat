@@ -342,23 +342,49 @@ struct LyricsOverlaySnapshotBuilder: Sendable {
 @MainActor
 @Observable
 final class AppState {
-    var isOverlayVisible = false
+    var isOverlayVisible = false {
+        didSet {
+            if oldValue && !isOverlayVisible { invalidatePreparedTranslationRequest() }
+        }
+    }
+    private(set) var isOverlayLocked: Bool
+    private(set) var snapsOverlayToEdges: Bool
     var isMockPreviewRunning = false
     var isLiveModeRunning = false
     var providerRuntimeState: ProviderRuntimeState = .idle
     var translationRuntimeState: TranslationRuntimeState = .idle
     var overlayContentState: OverlayContentState = .ready
-    var playerState: PlayerState
+    var playerState: PlayerState {
+        didSet {
+            if oldValue.track?.id != playerState.track?.id { invalidatePreparedTranslationRequest() }
+        }
+    }
     var nowPlayingArtwork: NSImage?
     var musicVolume: Int?
     var isPlaybackCommandInFlight = false
     private(set) var nowPlayingArtworkTrackID: String?
-    var lyricsDocument: LyricsDocument
+    var lyricsDocument: LyricsDocument {
+        didSet {
+            if !oldValue.hasSameTranslationContent(as: lyricsDocument) { invalidatePreparedTranslationRequest() }
+        }
+    }
     var translation: LyricTranslation
-    var runtimeFeatureFlags = RuntimeFeatureFlags.architectureDefault
-    var showsTranslation: Bool
+    var runtimeFeatureFlags = RuntimeFeatureFlags.architectureDefault {
+        didSet {
+            if oldValue != runtimeFeatureFlags { invalidatePreparedTranslationRequest() }
+        }
+    }
+    var showsTranslation: Bool {
+        didSet {
+            if oldValue != showsTranslation { invalidatePreparedTranslationRequest() }
+        }
+    }
     var isLyricsOverlayExpanded: Bool
-    var preferredTranslationLanguageIdentifier: String
+    var preferredTranslationLanguageIdentifier: String {
+        didSet {
+            if oldValue != preferredTranslationLanguageIdentifier { invalidatePreparedTranslationRequest() }
+        }
+    }
     var overlayWidthPreset: OverlayWidthPreset
     var reduceHiddenMemoryUsage: Bool
     /// Global default offset used when the current track has no remembered
@@ -376,11 +402,15 @@ final class AppState {
 
     private let snapshotBuilder = LyricsOverlaySnapshotBuilder()
     private let userDefaults: UserDefaults
+    private(set) var translationPreparationContextID = UUID()
+    @ObservationIgnored private var preparedTranslationRequestID: UUID?
     private static let perTrackOffsetsKey = "perTrackLyricOffsets"
     private static let preferredTranslationLanguageIdentifierKey = "preferredTranslationLanguageIdentifier"
 
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
+        isOverlayLocked = userDefaults.object(forKey: "overlayLocked") as? Bool ?? false
+        snapsOverlayToEdges = userDefaults.object(forKey: "snapsOverlayToEdges") as? Bool ?? false
         playerState = MockMusicAppBridge.previewState
         lyricsDocument = MockLyricsProvider.previewDocument
 
@@ -595,6 +625,16 @@ final class AppState {
         AppTelemetry.windowing.info("Lyrics overlay expanded=\(isExpanded)")
     }
 
+    func setOverlayLocked(_ isLocked: Bool) {
+        isOverlayLocked = isLocked
+        userDefaults.set(isLocked, forKey: "overlayLocked")
+    }
+
+    func setSnapsOverlayToEdges(_ shouldSnap: Bool) {
+        snapsOverlayToEdges = shouldSnap
+        userDefaults.set(shouldSnap, forKey: "snapsOverlayToEdges")
+    }
+
     /// High-frequency update — does NOT touch `playerState`, so menu/Settings
     /// observers don't re-evaluate. Called from the playback tick.
     func updateLiveElapsedTime(_ value: TimeInterval) {
@@ -626,6 +666,7 @@ final class AppState {
     }
 
     func setProviderRuntimeState(_ state: ProviderRuntimeState) {
+        invalidatePreparedTranslationRequest()
         providerRuntimeState = state
         AppTelemetry.performance.info("Provider runtime state set to \(state.displayName, privacy: .public)")
     }
@@ -641,10 +682,12 @@ final class AppState {
     }
 
     func applyTranslation(_ translation: LyricTranslation) {
+        invalidatePreparedTranslationRequest()
         self.translation = translation
     }
 
     func clearTranslation() {
+        invalidatePreparedTranslationRequest()
         translation = LyricTranslation(
             targetLanguageIdentifier: preferredTranslationLanguageIdentifier,
             sourceLanguageIdentifier: lyricsDocument.sourceLanguageIdentifier,
@@ -653,23 +696,98 @@ final class AppState {
     }
 
     func setTranslationRuntimeState(_ state: TranslationRuntimeState) {
+        invalidatePreparedTranslationRequest()
+        updateTranslationRuntimeState(state)
+    }
+
+    private func updateTranslationRuntimeState(_ state: TranslationRuntimeState) {
         translationRuntimeState = state
         AppTelemetry.performance.info("Translation runtime state set to \(state.displayName, privacy: .public)")
     }
 
+    private func invalidatePreparedTranslationRequest() {
+        preparedTranslationRequestID = nil
+        translationPreparationContextID = UUID()
+    }
+
+    func beginPreparedTranslationRequest() -> PreparedTranslationRequest? {
+        guard preparedTranslationRequestID == nil,
+              showsTranslation,
+              let trackID = playerState.track?.id,
+              let download = pendingTranslationDownload,
+              download.target == preferredTranslationLanguageIdentifier else { return nil }
+        let request = PreparedTranslationRequest(
+            id: UUID(),
+            contextID: translationPreparationContextID,
+            trackID: trackID,
+            document: lyricsDocument,
+            sourceLanguageIdentifier: download.source,
+            targetLanguageIdentifier: download.target
+        )
+        preparedTranslationRequestID = request.id
+        return request
+    }
+
+    func ownsPreparedTranslationRequest(_ request: PreparedTranslationRequest) -> Bool {
+        preparedTranslationRequestID == request.id
+            && translationPreparationContextID == request.contextID
+            && showsTranslation
+            && playerState.track?.id == request.trackID
+            && preferredTranslationLanguageIdentifier == request.targetLanguageIdentifier
+            && lyricsDocument.hasSameTranslationContent(as: request.document)
+    }
+
+    func preparedTranslationDidStart(_ request: PreparedTranslationRequest) -> Bool {
+        guard !Task.isCancelled, ownsPreparedTranslationRequest(request) else { return false }
+        updateTranslationRuntimeState(.translating)
+        return true
+    }
+
+    func completePreparedTranslation(
+        _ request: PreparedTranslationRequest,
+        translation: LyricTranslation?
+    ) -> Bool {
+        guard !Task.isCancelled, ownsPreparedTranslationRequest(request) else { return false }
+        if let translation {
+            self.translation = translation
+            updateTranslationRuntimeState(.ready)
+        } else {
+            updateTranslationRuntimeState(.idle)
+        }
+        preparedTranslationRequestID = nil
+        return true
+    }
+
+    func cancelPreparedTranslation(_ request: PreparedTranslationRequest) -> Bool {
+        guard ownsPreparedTranslationRequest(request) else { return false }
+        preparedTranslationRequestID = nil
+        updateTranslationRuntimeState(.idle)
+        return true
+    }
+
+    func failPreparedTranslation(_ request: PreparedTranslationRequest, reason: String) -> Bool {
+        guard !Task.isCancelled, ownsPreparedTranslationRequest(request) else { return false }
+        preparedTranslationRequestID = nil
+        updateTranslationRuntimeState(.failed(reason))
+        return true
+    }
+
     func applyProviderReady() {
+        invalidatePreparedTranslationRequest()
         providerRuntimeState = .ready
         overlayContentState = .ready
         AppTelemetry.performance.info("Provider pipeline ready")
     }
 
     func applyProviderUnavailable() {
+        invalidatePreparedTranslationRequest()
         providerRuntimeState = .unavailable
         overlayContentState = .unavailable
         AppTelemetry.performance.info("Provider pipeline unavailable")
     }
 
     func applyProviderFailure(_ message: String) {
+        invalidatePreparedTranslationRequest()
         providerRuntimeState = .failed(message)
         overlayContentState = .failed(message)
         AppTelemetry.performance.info("Provider pipeline failed")

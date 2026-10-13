@@ -47,6 +47,22 @@ Keep raw traces out of git; cite run IDs from `reports/performance-runs.jsonl`.
   AppleEvent timeout parameters such as `timeout 7200` from
   `network_timeout_count`. The clean snapshot row above records zero real
   network timeout failures after that correction.
+- 2026-10-13 invalid capture: clean snapshot run
+  `20261013-123253Z-live-Direct-Sample-d8dfcc1` built default Release but
+  failed live verification because macOS denied `log stream` to the non-admin
+  account. Its empty event/timeout counters are not live or network-health proof.
+  The failed row and local artifacts are retained. Direct samples now also capture
+  app stderr with `OS_ACTIVITY_DT_MODE=YES`, select a single log source to avoid
+  duplicate event counts, and label limited process-network coverage when the
+  unified stream is unavailable. Capture settings are part of comparison compatibility.
+- 2026-10-13 clean current-candidate follow-up:
+  `20261013-123954Z-live-Direct-Sample-de7c419` (snapshot `de7c419c`) passed live
+  verification with timed LRCLIB lyrics, two watchdog seeks, four resyncs, and one
+  track change. 28 usage samples reported avg RSS 115.51 MB, max RSS 119.33 MB,
+  avg CPU 3.59 percent, and max CPU 33.6 percent. This is the app-stderr logging
+  lane with limited process-network coverage, not a comparable baseline/candidate
+  pair or evidence of a performance improvement. Both artifacts and compact rows
+  are preserved; no artifacts were cleaned.
 - Next check: collect a clean same-mode `--live --drive-music`
   baseline/candidate pair while Music.app can play a lyric-capable track. Use
   `script/profile_snapshot.sh` or a real clean branch/worktree so the measured

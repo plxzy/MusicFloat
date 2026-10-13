@@ -1,11 +1,34 @@
 # Live Lyrics Accuracy — Status & Next Steps
 
-Last updated: 2026-05-25
+Last updated: 2026-10-13
 
 Snapshot of where the live-lyrics pipeline stands after the active-line AX pass,
 Apple Music web-API integration, syllable-aware overlay progress, and the latest
 provider-cache hardening. Tracks what works, what doesn't, and the most useful
 next moves.
+
+## 2026-10-13 playback recovery follow-up
+
+- User observed Music playing while the overlay waited for playback. Recovery now
+  covers a failed/nil initial snapshot and missed resume events while visible;
+  startup notification subscription precedes snapshot/volume suspension. Paused
+  states do not advance elapsed time, and hiding cancels recovery checks.
+- Full gate passed 199 tests including silent-event-stream and cancellation
+  fixtures. A fresh Debug live launch displayed the active track and Pause control.
+  This verifies current playback visibility, not the exact earlier failure trigger.
+- Initial Release sample `20261013-123253Z-live-Direct-Sample-d8dfcc1` is invalid:
+  macOS denied unified log streaming. No network-health conclusion follows from its
+  empty counters. The historical timeout issue remains open.
+- Clean default Release run `20261013-123954Z-live-Direct-Sample-de7c419` passed live
+  playback, overlay visibility, non-mock lyrics, provider readiness, and driven
+  event verification. Two LRCLIB lookups returned timed documents (78 and 61 lines);
+  counters recorded two watchdog seeks, four resyncs, and one track change. This
+  run did not exercise Apple Music web TTML or prepared Translation output.
+  App-stderr capture recorded zero timeout lines with limited process-network
+  coverage; the network timeout issue remains open.
+- Nested TTML, shared provider cancellation, and prepared Translation ownership
+  now have regression coverage; actual Translation language downloads and physical
+  multi-monitor interaction still need runtime acceptance.
 
 ## Current pipeline
 

@@ -169,27 +169,26 @@ actor EphemeralMediaCache: UserControllableMediaCache {
         guard let entry = storage[key] else {
             return nil
         }
-        guard entry.expiresAt > timestamp else {
-            removeEntry(for: key)
-            return nil
-        }
         touch(key)
         return entry.payload
     }
 
     func store(_ payload: MediaCachePayload, for key: MediaCacheKey) async {
+        store(payload, for: key, expiresAt: now().addingTimeInterval(policy.ttl(for: key, payload: payload)))
+    }
+
+    func store(_ payload: MediaCachePayload, for key: MediaCacheKey, expiresAt: Date) {
         let timestamp = now()
         removeExpiredEntries(now: timestamp)
 
-        let ttl = policy.ttl(for: key, payload: payload)
         let cost = payload.estimatedCost
-        guard policy.maxEntries > 0, policy.maxTotalCost > 0, ttl > 0, cost <= policy.maxTotalCost else {
+        guard policy.maxEntries > 0, policy.maxTotalCost > 0, expiresAt > timestamp, cost <= policy.maxTotalCost else {
             removeEntry(for: key)
             return
         }
 
         removeEntry(for: key)
-        storage[key] = Entry(payload: payload, expiresAt: timestamp.addingTimeInterval(ttl), cost: cost)
+        storage[key] = Entry(payload: payload, expiresAt: expiresAt, cost: cost)
         order.append(key)
         totalCost += cost
         enforceLimits()
@@ -349,12 +348,6 @@ actor DiskBackedMediaCache: UserControllableMediaCache {
         guard var entry = entriesByLookupKey[lookup] else {
             return nil
         }
-        guard entry.expiresAt > timestamp else {
-            removeDiskEntry(lookupKey: lookup)
-            persistIndex()
-            return nil
-        }
-
         let fileURL = fileURL(for: entry)
         guard let data = try? Data(contentsOf: fileURL),
               let record = try? JSONDecoder().decode(DiskPayloadRecord.self, from: data),
@@ -367,7 +360,7 @@ actor DiskBackedMediaCache: UserControllableMediaCache {
         entry.lastAccessAt = timestamp
         entriesByLookupKey[lookup] = entry
         persistIndex()
-        await memoryCache.store(payload, for: key)
+        await memoryCache.store(payload, for: key, expiresAt: entry.expiresAt)
         AppTelemetry.performance.info(
             "Media cache disk hit namespace=\(key.namespace.rawValue, privacy: .public)"
         )
@@ -382,6 +375,7 @@ actor DiskBackedMediaCache: UserControllableMediaCache {
             return
         }
 
+        ensureInitialized()
         let ttl = memoryPolicy.ttl(for: key, payload: payload)
         let estimatedCost = payload.estimatedCost
         guard diskPolicy.maxEntries > 0,
@@ -394,7 +388,6 @@ actor DiskBackedMediaCache: UserControllableMediaCache {
             return
         }
 
-        ensureInitialized()
         let record = DiskPayloadRecord(payload: payload)
         guard let data = try? JSONEncoder().encode(record),
               data.count <= diskPolicy.maxObjectCost else {
